@@ -34,6 +34,11 @@
 
 #include "yolov5.h"
 
+// Set via `make NUM_CLASSES=<n>`; see src/yolov5.cpp for details.
+#ifndef YOLO_NUM_CLASSES
+#define YOLO_NUM_CLASSES 80
+#endif
+
 int coco80_to_coco91_class(int id)
 {
     // # converts 80-index (val2014) to 91-index (paper)
@@ -56,11 +61,13 @@ std::vector<float> xyxy2xywh(float x0, float x1, float x2, float x3)
     return {x0, x1, x2 - x0, x3 - x1};
 }
 
-std::vector<std::string> readCocoPaths(std::string coco_file_path)
+// Reads an image-list file (one path per line, relative to coco_file_path or
+// absolute) and returns the resolved paths. Default list = COCO val2017; pass a
+// custom one via --list for non-COCO datasets.
+std::vector<std::string> readCocoPaths(std::string coco_file_path, const std::string &list_file)
 {
     std::vector<std::string> result;
-    const std::string        test_file_list = "./data/coco_val_2017_list.txt";
-    std::ifstream            coco_test_file(test_file_list);
+    std::ifstream            coco_test_file(list_file);
     std::string              line;
     if (coco_file_path.back() != '/')
     {
@@ -70,7 +77,14 @@ std::vector<std::string> readCocoPaths(std::string coco_file_path)
     {
         while (getline(coco_test_file, line))
         {
-            result.push_back(coco_file_path + line);
+            if (!line.empty() && line.front() == '/') // absolute path: no prefix
+            {
+                result.push_back(line);
+            }
+            else
+            {
+                result.push_back(coco_file_path + line);
+            }
         }
     }
     return result;
@@ -110,7 +124,8 @@ int main(int argc, char **argv)
     if (input.cmdOptionExists("-h"))
     {
         printf("Usage 1: ./validate_coco --engine path_to_engine_or_loadable  --coco_path path_to_coco_dataset "
-               "--backend cudla_fp16/cudla_int8\n");
+               "--backend cudla_fp16/cudla_int8 [--list path_to_image_list_txt]   # default list: "
+               "./data/coco_val_2017_list.txt\n");
         printf("Usage 2: ./validate_coco --engine path_to_engine_or_loadable  --image path_to_image --backend "
                "cudla_fp16/cudla_int8\n");
         return 0;
@@ -124,6 +139,11 @@ int main(int argc, char **argv)
     std::string backend_str = input.getCmdOption("--backend");
     std::string coco_path   = input.getCmdOption("--coco_path");
     std::string image_path  = input.getCmdOption("--image");
+    std::string list_file   = input.getCmdOption("--list");
+    if (list_file.empty())
+    {
+        list_file = "./data/coco_val_2017_list.txt";
+    }
 
     Yolov5Backend backend = Yolov5Backend::CUDLA_FP16;
     if (backend_str == "cudla_fp16")
@@ -138,7 +158,7 @@ int main(int argc, char **argv)
     yolov5 yolov5_infer(engine_path, backend);
 
     std::vector<cv::Mat>            bgr_imgs;
-    std::vector<std::string>        imgPathList = readCocoPaths(coco_path);
+    std::vector<std::string>        imgPathList = readCocoPaths(coco_path, list_file);
     std::vector<std::vector<float>> results;
 
     if (!image_path.empty())
@@ -178,15 +198,18 @@ int main(int argc, char **argv)
         results = yolov5_infer.postProcess4Validation(0.001f, 0.65f);
         printf("Num object detect: %ld\n", results.size());
 
-        // processing the name. eg: ./images/train2017/000000000250.jpg will be processed as 250
-        int image_id = stoi(imgPathList[i].substr(imgPathList[i].length() - 16,
-                                                  imgPathList[i].find_last_of(".") - (imgPathList[i].length() - 16)));
+        // COCO models: int image ids (numeric stems) + coco91 category map.
+        // Custom-class models: string filename stem + identity category ids —
+        // matching make_coco_json.py's GT encoding (COCOeval needs one id type).
+        const bool        is_coco = (YOLO_NUM_CLASSES == 80);
+        const std::string fname   = imgPathList[i].substr(imgPathList[i].find_last_of('/') + 1);
+        const std::string stem    = fname.substr(0, fname.find_last_of('.'));
         for (size_t k = 0; k < results.size(); k++)
         {
             Json::Value OneResult;
             Json::Value bboxObj;
-            OneResult["image_id"]    = image_id;
-            OneResult["category_id"] = coco80_to_coco91_class(results[k][4]);
+            OneResult["image_id"]    = is_coco ? Json::Value(std::stoi(stem)) : Json::Value(stem);
+            OneResult["category_id"] = is_coco ? coco80_to_coco91_class((int)results[k][4]) : (int)results[k][4];
             OneResult["score"]       = results[k][5];
 
             std::vector<float> point = xyxy2xywh(results[k][0], results[k][1], results[k][2], results[k][3]);

@@ -1,29 +1,34 @@
 # Generate a COCO-format GT json from YOLO-format txt lists, so that
-# `scripts/qat.py ... --save-json` can run pycocotools COCOeval on a custom dataset.
+# `scripts/qat.py ... --save-json` (or the C++ app's test_coco_map.py) can run
+# pycocotools COCOeval on a custom dataset.
 #
-# The output must match val.py's prediction encoding:
-#   - image_id:    int(stem) if stem.isnumeric() else stem   (val.py save_one_json)
-#   - category_id: identity (val.py class_map = list(range(1000)) for non-COCO data)
+# The output must match the prediction encoding:
+#   - image_id:    string filename stem (custom datasets; COCOeval sorts imgIds,
+#                  so ids must share one type)
+#   - category_id: identity (non-COCO data)
 #   - bbox:        absolute pixel [x_topleft, y_topleft, w, h] in the ORIGINAL image
 #
-# Usage (from repo root):
-#   python scripts/make_coco_json.py --cocodir /root/dataset/3classes \
-#       --data data/3classes.yaml \
-#       --val-list origin_val.txt ship_add_val.txt ship_blank_add_val.txt
+# Torch-free: runs with just PyYAML + Pillow. List entries may be absolute or
+# relative to --cocodir.
+#
+# Usage (from anywhere):
+#   python3 yolov5_dla/scripts/make_coco_json.py --cocodir /media/data/jia/3classes \
+#       --data yolov5_dla/data/3classes.yaml --val-list val_all.txt
 
-import sys
 import os
 import json
 import argparse
 from pathlib import Path
 
-# Add the current directory to PYTHONPATH for yolov5 imports
-sys.path.insert(0, os.path.abspath("."))
-
+import yaml
 from PIL import Image
 
-from utils.dataloaders import img2label_paths  # same images/ -> labels/ swap as training/val
-from utils.general import check_dataset
+
+def img2label_paths(img_paths):
+    # Same images/ -> labels/ swap as yolov5's utils.dataloaders, inlined here —
+    # importing utils.dataloaders would pull in torch for no reason.
+    sa, sb = f"{os.sep}images{os.sep}", f"{os.sep}labels{os.sep}"
+    return [sb.join(x.rsplit(sa, 1)).rsplit(".", 1)[0] + ".txt" for x in img_paths]
 
 
 def yolo_to_coco(cocodir, lists, names, save):
@@ -38,6 +43,8 @@ def yolo_to_coco(cocodir, lists, names, save):
 
         for im_file, lb_file in zip(im_files, img2label_paths(im_files)):
             im_file, lb_file = Path(im_file), Path(lb_file)
+            if not im_file.is_absolute():  # list entries may be relative to cocodir
+                im_file, lb_file = Path(cocodir) / im_file, Path(cocodir) / lb_file
             if im_file in seen:  # the same image may appear in several lists
                 continue
             seen.add(im_file)
@@ -86,9 +93,9 @@ if __name__ == "__main__":
     parser.add_argument("--save", type=str, default=None, help="output json (default <cocodir>/annotations/instances_val2017.json)")
     args = parser.parse_args()
 
-    data = check_dataset(args.data)
+    data = yaml.safe_load(open(args.data))
     names = data["names"]
     if isinstance(names, dict):
-        names = [names[i] for i in range(data["nc"])]
+        names = [names[i] for i in range(len(names))]
 
     yolo_to_coco(args.cocodir, args.val_list, names, args.save or Path(args.cocodir) / "annotations" / "instances_val2017.json")

@@ -173,15 +173,14 @@ Then compare the new cache's `images:` hex entry (big-endian IEEE-754 → float)
 
 **⑦ Jetson — build the loadable.** Copy [build_dla_standalone_loadable_3classes.sh](data/model/build_dla_standalone_loadable_3classes.sh), repoint its 3 paths (cache source, `_noqdq.onnx`, output `.bin`), run it. The 3 head-conv FP16 `--layerPrecisions` stay unchanged — those node names are nc-independent.
 
-**⑧ Jetson — C++ adaptation** (nc is now a named constant, one line per file):
-
-- `kNumClasses` in [src/yolov5.cpp:31](src/yolov5.cpp) — drives buffer sizes + the two decode call sites
-- `kNumClasses` in [matx_reformat.cu](src/matx_reformat/matx_reformat.cu) — `kChPerAnchor`/`kChw16Groups`/`kChw32Groups` derive from it (CHW16/CHW32 pad head channels to multiples of 16/32, so the 5D reformat views' group dim changes with nc); `decode_nms.cu` is parameterized — no change
-- `anchors[]` in yolov5.cpp — only if ② replaced them; `mInputScale` — only if ⑥ found a different value
+**⑧ Jetson — build with the right class count** (nc is a build flag — no source edits):
 
 ```bash
-cd src/matx_reformat/build && make -j4 && cd ../../.. && make
+NUM_CLASSES=<nc> bash src/matx_reformat/build_matx_reformat.sh   # rebuild the matx lib
+make clean && make NUM_CLASSES=<nc>
 ```
+
+`NUM_CLASSES` defaults to 80 (the shipped COCO model). It drives buffer sizes, the decode call sites and the CHW16/CHW32 reformat group dims (`YOLO_NUM_CLASSES` macro in [src/yolov5.cpp](src/yolov5.cpp) and [matx_reformat.cu](src/matx_reformat/matx_reformat.cu); `decode_nms.cu` is parameterized). **The flag must match the loadable passed to `--engine`/`ENGINE=`** — a mismatch silently garbage-results (symptom: mAP ≈ 0.01, missing objects). Also: `anchors[]` in yolov5.cpp — only if ② replaced them; `mInputScale` — only if ⑥ found a different value.
 
 **⑨ Jetson — run and verify** (detections drawn to `result.jpg`):
 

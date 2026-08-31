@@ -34,6 +34,11 @@ set(CMAKE_CUDA_ARCHITECTURES 87)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CUDA_STANDARD 17)
 set(CMAKE_CUDA_STANDARD_REQUIRED ON)
+
+# Number of classes of the deployed model — must match the app build's
+# NUM_CLASSES (build with: NUM_CLASSES=<n> bash build_matx_reformat.sh)
+set(YOLO_NUM_CLASSES "80" CACHE STRING "classes of the deployed YOLOv5 model")
+add_compile_definitions(YOLO_NUM_CLASSES=${YOLO_NUM_CLASSES})
 # Compiler flags
 set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -Wno-deprecated-declarations")
 set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -Xcompiler -fPIC")

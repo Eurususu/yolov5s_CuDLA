@@ -43,6 +43,12 @@ endif
 
 NVCC_FLAGS := -gencode arch=compute_87,code=sm_87
 
+# Number of classes of the deployed model — must match the loadable passed via
+# --engine / ENGINE=. Switching requires a matx rebuild AND make clean:
+#   NUM_CLASSES=3 bash src/matx_reformat/build_matx_reformat.sh && make clean && make
+NUM_CLASSES ?= 80
+ALL_CCFLAGS += -DYOLO_NUM_CLASSES=$(NUM_CLASSES)
+
 OPENCV_INCLUDE_PATH ?= /usr/include/opencv4/
 OPENCV_LIB_PATH ?= /usr/lib/aarch64-linux-gnu/
 

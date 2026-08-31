@@ -173,15 +173,14 @@ python3 qdq_translator.py --input_onnx_models=../../data/model/mydata_qat.onnx \
 
 **⑦ Jetson —— 构建 loadable。** 复制 [build_dla_standalone_loadable_3classes.sh](data/model/build_dla_standalone_loadable_3classes.sh)，改 3 处路径（缓存源、`_noqdq.onnx`、输出 `.bin`）后运行。3 个检测头 conv 的 FP16 `--layerPrecisions` 不用动 —— 那些节点名与类别数无关。
 
-**⑧ Jetson —— C++ 适配**（nc 已是具名常量，每个文件改一行）：
-
-- [src/yolov5.cpp:31](src/yolov5.cpp) 的 `kNumClasses` —— 驱动缓冲区尺寸和两处 decode 调用点
-- [matx_reformat.cu](src/matx_reformat/matx_reformat.cu) 的 `kNumClasses` —— `kChPerAnchor`/`kChw16Groups`/`kChw32Groups` 由它推导（CHW16/CHW32 会把检测头通道补齐到 16/32 的倍数，故 5D 重排视图的分组维度随 nc 变化）；`decode_nms.cu` 是参数化的，无需改动
-- yolov5.cpp 的 `anchors[]` —— 仅当 ② 替换过锚点；`mInputScale` —— 仅当 ⑥ 发现值不同
+**⑧ Jetson —— 用正确的类别数构建**（nc 是构建参数，无需改源码）：
 
 ```bash
-cd src/matx_reformat/build && make -j4 && cd ../../.. && make
+NUM_CLASSES=<nc> bash src/matx_reformat/build_matx_reformat.sh   # 重编 matx 库
+make clean && make NUM_CLASSES=<nc>
 ```
+
+`NUM_CLASSES` 默认 80（仓库自带的 COCO 模型）。它驱动缓冲区尺寸、decode 调用点和 CHW16/CHW32 重排的分组维度（`YOLO_NUM_CLASSES` 宏，见 [src/yolov5.cpp](src/yolov5.cpp) 与 [matx_reformat.cu](src/matx_reformat/matx_reformat.cu)；`decode_nms.cu` 是参数化的）。**该参数必须与 `--engine`/`ENGINE=` 传入的 loadable 匹配** —— 不匹配会静默产生乱码级结果（症状：mAP ≈ 0.01、目标检不出）。另外：仅当 ② 替换过锚点才需改 yolov5.cpp 的 `anchors[]`；仅当 ⑥ 发现值不同才需改 `mInputScale`。
 
 **⑨ Jetson —— 运行验证**（检测结果画框写入 `result.jpg`）：
 

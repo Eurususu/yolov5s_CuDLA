@@ -25,10 +25,15 @@
 #include <cuda_runtime.h>
 #include <iostream>
 
-// Number of classes detected by the deployed model — keep in sync with the
-// trained model (3-class custom model: data/model/yolov5_3clases_*).
+// Number of classes detected by the deployed model — set at build time via
+// `make NUM_CLASSES=<n>` (default 80 = the original COCO model; use 3 for the
+// custom 3-class model). Must match the loadable passed to --engine; switching
+// also requires rebuilding the matx lib and `make clean`.
 // Channels per anchor = num_classes + 5 (x, y, w, h, obj).
-constexpr int kNumClasses = 3;
+#ifndef YOLO_NUM_CLASSES
+#define YOLO_NUM_CLASSES 80
+#endif
+constexpr int kNumClasses = YOLO_NUM_CLASSES;
 
 template <typename T, int N> void printBuffer(const void *buffer)
 {

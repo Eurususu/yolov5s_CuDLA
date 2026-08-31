@@ -104,11 +104,15 @@ void* allocDeviceMemory(size_t size)
     return device_ptr;
 }
 
-// Channel geometry of the YOLOv5 heads — keep in sync with the deployed model
-// (3-class custom model; was 80 classes / 85 channels for the COCO original).
+// Channel geometry of the YOLOv5 heads — num classes comes from the app build
+// (`NUM_CLASSES=<n>`, default 80 = COCO model; 3 = the custom 3-class model);
+// keep it in sync with the loadable passed to --engine.
 // channels per head = 3 anchors * (num_classes + 5); DLA CHW16 pads channels
 // to a multiple of 16, CHW32 (V2 paths) to a multiple of 32.
-constexpr int kNumClasses  = 3;
+#ifndef YOLO_NUM_CLASSES
+#define YOLO_NUM_CLASSES 80
+#endif
+constexpr int kNumClasses  = YOLO_NUM_CLASSES;
 constexpr int kChPerAnchor = kNumClasses + 5;               // 8: x, y, w, h, obj + classes
 constexpr int kHeadCh      = 3 * kChPerAnchor;              // 24
 constexpr int kChw16Groups = (kHeadCh + 15) / 16;           // 2  (24 -> padded 32)

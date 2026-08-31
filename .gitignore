@@ -1,0 +1,16 @@
+data/loadable
+temp/
+build/
+predict.json
+data/coco
+src/matx_reformat/build
+result.jpg
+.vscode/
+
+# Large binary artifacts (regenerable via the documented pipeline; original repo used git-LFS)
+*.onnx
+*.pt
+__pycache__/
+*.pyc
+.codegraph/
+_predictions.json

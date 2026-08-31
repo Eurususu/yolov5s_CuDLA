@@ -1,0 +1,17 @@
+path: /root/dataset/3classes  # GT json for --save-json lives at <path>/annotations/instances_val2017.json
+train:
+  - /root/dataset/3classes/origin_train.txt
+  - /root/dataset/3classes/ship_add_train.txt
+  - /root/dataset/3classes/ship_blank_add_train.txt
+val:
+  - /root/dataset/3classes/origin_val.txt
+  - /root/dataset/3classes/ship_add_val.txt
+  - /root/dataset/3classes/ship_blank_add_val.txt
+test:
+
+nc: 3
+
+names:
+  0: person
+  1: car
+  2: bike

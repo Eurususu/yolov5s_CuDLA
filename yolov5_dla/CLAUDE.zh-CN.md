@@ -60,6 +60,21 @@ python scripts/qat.py quantize runs/train/exp2/weights/best.pt --cocodir /root/d
 python scripts/qat.py export qat.pt --size=672 --save=yolov5_trimmed_qat.onnx --dynamic --noanchor
 ```
 
+#### 两种导出风味（INT8 路径 vs FP16 路径）
+
+`qat.py export` 服务于两条不同的下游路径 —— 按用途选择输入 checkpoint 和参数：
+
+| | QAT ONNX（INT8 路径） | FP32 trimmed ONNX（FP16 路径） |
+|---|---|---|
+| 命令 | `export qat.pt --size=672 --save=..._qat.onnx --dynamic --noanchor` | `export runs/.../best.pt --size=672 --save=..._fp32_trimmed.onnx --dynamic --noanchor --noqadd` |
+| 输入 checkpoint | `qat.pt` / `ptq.pt` —— 带有已校准 scale 的 Quant* 模块 | `best.pt` —— 纯 FP32 模型，无量化器 |
+| 导出的图 | **内嵌 Q/DQ 节点**（显式量化，scale 来自训练校准） | **纯净 FP32 图** —— 零 Q/DQ 节点 |
+| 下游消费者 | `qdq_translator.py` → PTQ ONNX + INT8 校准缓存 → trtexec `--int8 --calib` | trtexec 直接 `--fp16` 编译（无需校准缓存） |
+
+- `--noqadd` 只对 FP16 风味重要：默认 `cmd_export` 还会执行 `replace_bottleneck_forward()`，把 Bottleneck 残差加法改经 **QuantAdd**。在 QAT checkpoint 上这些量化器是训练图的一部分、scale 已校准（保留）；而在纯 `best.pt` 上它们会被临时注入、**scale 未校准** → 图里多出约 14 个携带垃圾 scale 的伪 Q/DQ 节点，直接毁掉 FP16 构建。导出未量化的 checkpoint 时务必加 `--noqadd`。
+- 共用参数：`--size=672` = 部署分辨率；`--dynamic` = 动态 batch 轴；`--noanchor` 剥掉检测头的锚点解码（C++ 端用自己的锚点解码；输出原始 s8/s16/s32）。
+
+
 ```bash
 # 1.（可选）分析哪些层量化后损失最大
 python scripts/qat.py sensitive yolov5s.pt --cocodir datasets/coco

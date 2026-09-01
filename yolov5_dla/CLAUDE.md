@@ -62,6 +62,21 @@ python scripts/qat.py quantize runs/train/exp2/weights/best.pt --cocodir /root/d
 python scripts/qat.py export qat.pt --size=672 --save=yolov5_trimmed_qat.onnx --dynamic --noanchor
 ```
 
+#### The two export flavors (INT8 path vs FP16 path)
+
+`qat.py export` serves two different downstream paths — pick the input checkpoint and flags accordingly:
+
+| | QAT ONNX (INT8 path) | FP32 trimmed ONNX (FP16 path) |
+|---|---|---|
+| Command | `export qat.pt --size=672 --save=..._qat.onnx --dynamic --noanchor` | `export runs/.../best.pt --size=672 --save=..._fp32_trimmed.onnx --dynamic --noanchor --noqadd` |
+| Input checkpoint | `qat.pt` / `ptq.pt` — carries Quant* modules with calibrated scales | `best.pt` — plain FP32 model, no quantizers |
+| Graph emitted | **Q/DQ nodes embedded** (explicit quantization, trained scales) | **Clean FP32 graph** — zero Q/DQ nodes |
+| Consumer | `qdq_translator.py` → PTQ ONNX + INT8 calib cache → trtexec `--int8 --calib` | trtexec `--fp16` directly (no calibration cache) |
+
+- `--noqadd` matters only for the FP32 flavor: by default `cmd_export` also runs `replace_bottleneck_forward()`, routing Bottleneck residual adds through **QuantAdd**. On a QAT checkpoint those quantizers are calibrated and part of the trained graph (keep them); on a plain `best.pt` they get injected fresh with **uncalibrated scales** → ~14 bogus Q/DQ nodes whose garbage scales corrupt the FP16 build. Always pass `--noqadd` when exporting a non-quantized checkpoint.
+- Shared flags: `--size=672` = deployment resolution; `--dynamic` = dynamic batch axis; `--noanchor` strips the head's anchor decode (the C++ app decodes with its own anchors; outputs raw s8/s16/s32).
+
+
 ```bash
 # 1. (optional) find layers that hurt most when quantized
 python scripts/qat.py sensitive yolov5s.pt --cocodir datasets/coco

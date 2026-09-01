@@ -13,201 +13,26 @@ NVIDIA sample deploying a QAT (quantization-aware trained) YOLOv5s on the Orin D
 - **Toolchain:** CUDA 12.6 (`/usr/local/cuda`, nvcc targets sm_87), gcc 11.4.0, cmake 3.22.1.
 - **Libraries:** TensorRT 10.3.0.30 (`libnvinfer-dev`, trtexec at `/usr/src/tensorrt/bin/trtexec`), cuDLA (`/usr/local/cuda/lib64/libcudla.so`), OpenCV 4.8.0 (apt), `nvidia-l4t-nvsci` 36.5.2 — NvSci runtime libs only, no dev headers (hence [compat/nvsci-headers/](compat/nvsci-headers/)).
 - **Python:** 3.10.12 with pycocotools installed (mAP evaluation ready).
-- **Data:** COCO val2017 already present under `data/coco/`.
+- **Data:** COCO val2017 at `/media/data/jia/coco` (symlinked from `data/coco`); custom 3-class dataset at `/media/data/jia/3classes`. Both gitignored.
 - **Network:** GitHub only reliably reachable via LAN proxy `http://192.168.11.61:7890`.
-- **Python (export tooling):** fully installed and verified — see [Export Toolchain (Python)](#export-toolchain-python) for the package list, install commands and traps. `torch` is not installed (only needed for QAT fine-tuning).
+- **Python (export tooling):** fully installed and verified — see [Pipeline A](#pipeline-a--coco-qat-training--dla-deployment) for install commands and [Troubleshooting Log](#troubleshooting-log) for the traps. `torch` is not installed (only needed for QAT fine-tuning).
+- **Heavy artifacts (`*.onnx`, `*.pt`, loadables, datasets) are gitignored** — a fresh clone needs them copied in; they are reproducible via the two pipelines below.
 
-## Build & Run
-
-One-time setup (order matters — the app links against the matx library and expects loadables under `data/loadable/`):
-
-```bash
-bash data/model/build_dla_standalone_loadable.sh   # trtexec → DLA loadables (INT8 + FP16) into data/loadable/
-bash src/matx_reformat/build_matx_reformat.sh      # CMake build of matx_reformat lib (needs cmake ≥3.18, script auto-downloads it)
-```
-
-**Network note:** direct GitHub access from this machine is unreliable. `build_matx_reformat.sh` was patched to detect that and route through the LAN proxy `http://192.168.11.61:7890` (adjust/remove as needed). After the CCCL shim below, the MatX build no longer needs network at all.
-
-**CUDA 12.6 / JetPack 6 compatibility (matx_reformat):** MatX 0.4.1 (pinned submodule) was written for CUDA 11-era CCCL and fetches `libcudacxx` 2.1.0 at configure time, which conflicts with CUDA 12.6's bundled CCCL (NVTX v1-vs-v3 `#error`, missing `<__config>`). Fix (no submodule edits): [src/matx_reformat/compat/](src/matx_reformat/compat/) contains a `libcudacxx-shim/` whose `include` symlinks to `/usr/local/cuda/include` (forces MatX onto the toolkit's own CCCL via `FETCHCONTENT_SOURCE_DIR_LIBCUDACXX`) and an `nvtx-shim/nvToolsExt.h` that redirects the legacy NVTX v1 include to the nvtx3 drop-in. Wired in [src/matx_reformat/CMakeLists.txt](src/matx_reformat/CMakeLists.txt) before `add_subdirectory(MatX)`. If CUDA moves off `/usr/local/cuda`, fix the symlink. If a fetch failed before the shim existed, `rm -rf src/matx_reformat/build` before retrying.
-
-**TensorRT 10.x note (JetPack 6):** the repo's calibration cache `data/model/qat2ptq.cache` carries a `TRT-8600-EntropyCalibration2` header; TRT 10.x rejects it ("Calibration table does not match calibrator algorithm type") and then fails trying to recalibrate with no data (input tensor bound to nullptr). The build scripts were patched to `sed` the header to the locally installed TRT version into `data/loadable/qat2ptq.cache` and pass that to `--calib`. The `kPREFER_PRECISION_CONSTRAINTS cannot be set if kOBEY_PRECISION_CONSTRAINTS is set` error early in the trtexec log is harmless noise on TRT 10.3 (obey stays in effect).
-
-Main app (root Makefile, output `build/cudla_yolov5_app`):
-
-```bash
-make run                          # single image, INT8, hybrid mode
-make validate_cudla_int8          # COCO val + mAP (also: validate_cudla_fp16)
-make run USE_DLA_STANDALONE_MODE=1
-make run USE_DLA_STANDALONE_MODE=1 USE_DETERMINISTIC_SEMAPHORE=1   # for older DriveOS/JetPack
-```
-
-- **`make clean` is required when switching between hybrid and standalone mode** — the mode is a compile-time `#ifdef USE_DLA_STANDALONE_MODE` in [src/yolov5.cpp](src/yolov5.cpp), not a runtime option. The Makefile does not track this dependency.
-- The Makefile was patched to compile only the cuDLA context matching the selected mode and to link `-lnvscibuf -lnvscisync` (plus `-L /usr/lib/aarch64-linux-gnu/nvidia/`) only in standalone mode. JetPack ships the NvSci runtime libs (`nvidia-l4t-nvsci`) but **not** the dev headers — those were reconstructed from the public DRIVE OS 6.0.9 doxygen `_source.html` pages into [compat/nvsci-headers/](compat/nvsci-headers/) (see its README for provenance/license); the Makefile adds `-I ./compat/nvsci-headers`. Both modes verified working on JetPack 6.2 (L4T r36.5.2). `USE_DETERMINISTIC_SEMAPHORE` was not needed on this JetPack.
-- `USE_DETERMINISTIC_SEMAPHORE` only applies within standalone mode.
-- `DEBUG=1` for -g, default is -O2.
-- Clone must be `--recursive` (MatX submodule in `src/matx_reformat/MatX`); ONNX models in `data/model/` are git-LFS.
-
-Running the binary directly:
-
-```bash
-./build/cudla_yolov5_app --engine data/loadable/<loadable>.bin --image data/images/image.jpg --backend cudla_int8
-# or for COCO validation: --coco_path data/coco/ instead of --image (writes predict.json)
-```
-
-No `LD_LIBRARY_PATH` needed: the executable is linked with `-Wl,-rpath` pointing at `src/matx_reformat/build`, so it finds `libmatx_reformat.so` by itself (the Makefile's `export LD_LIBRARY_PATH=...` line only ever applied to make's own sub-processes — and note its `$LD_LIBRARY_PATH` is a Make typo that expands to `D_LIBRARY_PATH`, harmless).
-
-mAP evaluation (needs COCO val2017 in `data/coco/` via `data/download_coco_validation_set.sh` + `pip3 install pycocotools`):
-
-```bash
-python3 test_coco_map.py --predict predict.json --coco ./data/coco/
-```
-
-matx_reformat unit test (the only test binary): built by `src/matx_reformat/build_matx_reformat.sh`, run `./test` from `src/matx_reformat/build/` with that dir on `LD_LIBRARY_PATH`.
-
-Reference mAP on COCO 2017 val @ 1x3x672x672: 37.5 (DLA FP16), 37.1 (DLA INT8 QAT).
-
-## Export Toolchain (Python)
-
-Packages for the QAT→PTQ conversion path ([export/](export/)) — installed to the user site (`~/.local`), verified end-to-end on this machine (qdq_translator smoke-tested on `data/model/yolov5_trimmed_qat.onnx`):
-
-| Package | Version | How installed |
-|---|---|---|
-| pytorch-quantization | 2.1.3 | `pip install --no-deps --index-url https://pypi.nvidia.com pytorch-quantization` (traps below) |
-| absl-py, prettytable | latest | `pip install absl-py prettytable` — the real runtime deps of pytorch-quantization |
-| onnx | 1.22.0 | `pip install -i https://pypi.tuna.tsinghua.edu.cn/simple onnx` |
-| onnx_graphsurgeon | 0.6.1 | same mirror |
-| onnxoptimizer | 0.3.13 | `pip install --no-cache-dir -i https://pypi.tuna.tsinghua.edu.cn/simple onnxoptimizer` — **no aarch64 wheel**, so pip automatically falls back to a source build (C++ compiled via cmake; the system cmake 3.22 is sufficient). Takes ~15 min on the Orin; pip stays silent for most of it (run it in a terminal you won't close), finishing with `Successfully built onnxoptimizer` |
-| nvidia-pyindex | 1.0.9 | same mirror |
-
-Install traps encountered:
-
-- [export/README.md](export/README.md)'s `--extra-index-url https://pypi.ngc.nvidia.com` is dead (DNS fails) — NVIDIA's index moved to `pypi.nvidia.com`.
-- PyPI hosts a same-name `pytorch-quantization` **placeholder** (6.8 kB, setup.py always errors); `--extra-index-url` has no priority over PyPI, so pip may pick the placeholder. Use `--index-url` to *replace* the default index entirely.
-- The real NVIDIA wheel falsely declares `sphinx-glpi-theme` (a docs theme) as a runtime dependency, which is unresolvable from the NVIDIA index → install with `--no-deps`, then add `absl-py` + `prettytable` manually. `sphinx-glpi-theme` is never actually needed.
-- [export/qdq_translator/requirements.txt](export/qdq_translator/requirements.txt) pins `onnxoptimizer==0.3.2`, but the pin is not load-bearing: the script only calls `optimize(model, passes=[...])` with 4 passes (`extract_constant_to_initializer`, `fuse_bn_into_conv`, `fuse_pad_into_conv`, `fuse_pad_into_pool`), all present in 0.3.13.
-- Installing onnx raised user-site numpy to 2.2.6 (system 1.21.5 untouched); pycocotools verified still working. If a package later complains about numpy ABI, `pip install "numpy<2"`.
-
-`torch` is deliberately NOT installed — only the QAT fine-tuning step needs it; `qdq_translator` runs torch-free.
-
-Re-verify anytime:
-
-```bash
-python3 -c "import onnx, onnx_graphsurgeon, onnxoptimizer, pytorch_quantization; print('ok')"
-cd export/qdq_translator && python3 qdq_translator.py \
-    --input_onnx_models=../../data/model/yolov5_trimmed_qat.onnx \
-    --output_dir=/tmp/qdq_out --infer_concat_scales --infer_mul_scales   # → PTQ ONNX + calib cache + precision config
-```
-
-## QAT Training (off-device, GPU server)
-
-QAT fine-tuning runs on a separate GPU server (the Orin has no torch and training is impractical on-device). Copy **only the `yolov5_dla/` directory** — ultralytics yolov5 v7.0 plus a hardened, CLI-parameterized QAT layer (`quantization/`, `scripts/qat.py`, patched `models/common.py`). Its own CLAUDE.md documents the internals (module-replacement order, `rules.py` quantizer sharing, MSE-supervised fine-tuning, ONNX export tricks).
-
-**Weight warning:** use `yolov5s.pt` (v7.0), not `yolov5su.pt`. The 'u' variant carries different anchors, while [src/yolov5.cpp](src/yolov5.cpp) hardcodes v7.0 default anchors to decode the `--noanchor`-exported model — a mismatch silently corrupts detections. `attempt_download()` auto-fetches yolov5s.pt if missing.
-
-On the server:
-
-```bash
-cd yolov5_dla
-pip install -r requirements.txt
-pip install --no-deps --index-url https://pypi.nvidia.com pytorch-quantization && pip install absl-py prettytable
-bash data/scripts/get_coco.sh        # YOLO-format COCO → ../datasets/coco (~20GB)
-
-# COCO Option#1 (what the repo's shipped model used); add --all-node-with-qdq for Option#2
-python scripts/qat.py quantize yolov5s.pt --ptq=ptq.pt --qat=qat.pt \
-    --cocodir=../datasets/coco --eval-origin --eval-ptq
-python scripts/qat.py export qat.pt --size=672 --save=yolov5_trimmed_qat.onnx --dynamic --noanchor
-```
-
-`yolov5_dla`'s `qat.py` is fully parameterized — no code edits for custom datasets: the class count is read from the checkpoint automatically, and `--data <yaml>`, `--imgsz`, `--batch-size`, multiple `--train-list`/`--val-list` files and opt-in `--save-json` (pycocotools eval) are all CLI flags. The script calibrates → prints Origin/PTQ baseline mAP → fine-tunes, saving the best-AP epoch to `qat.pt` (history in `summary.json`); `--iters` caps batches/epoch for quick dry-runs. Full COCO epochs take hours on one GPU.
-
-The old **pycocotools AP ≈ 0.001 red herring** (category-id mismatch when the dataset root isn't named `coco`) is properly fixed here: `--save-json` is opt-in, `val.py`'s `save_one_json` is `is_coco`-aware (string image ids for custom datasets), and `scripts/make_coco_json.py` generates a COCO-format GT json so custom datasets can run COCOeval too.
-
-Back on the Jetson: copy **only** `yolov5_trimmed_qat.onnx` to `data/model/`, run `qdq_translator.py --infer_concat_scales --infer_mul_scales` (see Export Toolchain above), rebuild the loadable, and check whether the new cache's `images:` scale differs from `mInputScale` in [src/yolov5.cpp](src/yolov5.cpp) (`mOutputScale1-3` are dead code, see Architecture) — then rebuild and re-validate mAP.
-
-A completed retrain cycle (2026-08-26) lives in the repo as reference: `data/model/yolov5_trimmed_qat_8.26.onnx` (QAT ONNX from the server) + `yolov5_trimmed_qat_8.26_noqdq.onnx`/`.cache` (translator output) + [build_dla_standalone_loadable_8.26.sh](data/model/build_dla_standalone_loadable_8.26.sh) (INT8-only build, same 3 head-conv FP16 precisions) → `data/loadable/yolov5_8.26.int8...standalone.bin` (verified: COCO val2017 mAP50-95 = **37.1** — equal to the original shipped model — at ~5.5 ms/img; identical input scale so no C++ change was needed). The translator's `layer_arg.txt` being empty for the new model is fine — that file lists a maximal FP16 suggestion set, not a requirement. The Makefile's `run`/`validate_cudla_int8` targets accept `ENGINE=<path>` to point at such alternative loadables.
-
-## Custom-Dataset (non-COCO) Workflow
-
-End-to-end from your own dataset to DLA inference. Steps ①–⑤ run on the GPU server (one-time env setup: see [QAT Training (off-device, GPU server)](#qat-training-off-device-gpu-server)); steps ⑥–⑨ on the Jetson. A worked example lives in the repo — the 3-class model (`data/model/yolov5_3clases_qat*`, verified end-to-end 2026-08-28: 8 detections @ 3.74 ms/img vs 5.57 ms for the 80-class model).
-
-**① Server — data prep.** YOLO format (`images/` + `labels/`) + `data/mydata.yaml` (path/train/val/nc/names). Also create image-list txt files (any names, passed via `--train-list`/`--val-list`; paths must contain `images/` so labels resolve):
-
-```bash
-find $PWD/datasets/mydata/images/train -name '*.jpg' > datasets/mydata/train.txt
-find $PWD/datasets/mydata/images/val   -name '*.jpg' > datasets/mydata/val.txt
-```
-
-**② Server — FP32 training.** `--img 672` matches the fixed deployment input. Watch the autoanchor log: if anchors get replaced, they must be synced into C++ in step ⑧.
-
-```bash
-python train.py --img 672 --batch 32 --epochs 100 --data data/mydata.yaml --weights yolov5s.pt
-```
-
-**③ Server — nothing to adapt.** `yolov5_dla`'s `qat.py` reads the class count from the checkpoint automatically and takes `--data`/`--imgsz`/`--batch-size`/`--train-list`/`--val-list` as CLI flags. (Only the original `export/yolov5-qat` overlay had the 3 COCO hardcodes that needed code edits.)
-
-**④ Server — QAT fine-tune:**
-
-```bash
-python scripts/qat.py quantize runs/train/exp/weights/best.pt \
-    --ptq=ptq.pt --qat=qat.pt --cocodir=datasets/mydata \
-    --data data/mydata.yaml --imgsz 672 \
-    --train-list train.txt --val-list val.txt \
-    --eval-origin --eval-ptq
-```
-
-**⑤ Server — export ONNX, then copy ONLY the `.onnx` back to the Jetson's `data/model/`:**
-
-```bash
-python scripts/qat.py export qat.pt --size=672 --save=mydata_qat.onnx --dynamic --noanchor
-```
-
-**⑥ Jetson — translate** (graph-level, dataset-agnostic; outputs land next to the ONNX):
-
-```bash
-cd export/qdq_translator
-python3 qdq_translator.py --input_onnx_models=../../data/model/mydata_qat.onnx \
-    --output_dir=../../data/model/ --infer_concat_scales --infer_mul_scales
-```
-
-Then compare the new cache's `images:` hex entry (big-endian IEEE-754 → float) with `mInputScale` in src/yolov5.cpp — update if different. An empty `layer_arg.txt` is fine (it is a maximal FP16 suggestion list, not a requirement).
-
-**⑦ Jetson — build the loadable.** Copy [build_dla_standalone_loadable_3classes.sh](data/model/build_dla_standalone_loadable_3classes.sh), repoint its 3 paths (cache source, `_noqdq.onnx`, output `.bin`), run it. The 3 head-conv FP16 `--layerPrecisions` stay unchanged — those node names are nc-independent.
-
-**⑧ Jetson — build with the right class count** (nc is a build flag — no source edits):
-
-```bash
-NUM_CLASSES=<nc> bash src/matx_reformat/build_matx_reformat.sh   # rebuild the matx lib
-make clean && make NUM_CLASSES=<nc>
-```
-
-`NUM_CLASSES` defaults to 80 (the shipped COCO model). It drives buffer sizes, the decode call sites and the CHW16/CHW32 reformat group dims (`YOLO_NUM_CLASSES` macro in [src/yolov5.cpp](src/yolov5.cpp) and [matx_reformat.cu](src/matx_reformat/matx_reformat.cu); `decode_nms.cu` is parameterized). **The flag must match the loadable passed to `--engine`/`ENGINE=`** — a mismatch silently garbage-results (symptom: mAP ≈ 0.01, missing objects). Also: `anchors[]` in yolov5.cpp — only if ② replaced them; `mInputScale` — only if ⑥ found a different value.
-
-**⑨ Jetson — run and verify** (detections drawn to `result.jpg`):
-
-```bash
-./build/cudla_yolov5_app --engine data/loadable/mydata.int8...bin --image your.jpg --backend cudla_int8
-# or: make run ENGINE=... IMAGE=...
-```
-
-Accuracy verdict: server-side `val.py` mAP (`test_coco_map.py` is COCO-only). If boxes look systematically wrong on in-domain images, compare the checkpoint's `model.model[-1].anchors` against yolov5.cpp's `anchors[]`.
-
-Lazy alternative for experiments only: map custom classes into unused COCO slots (keep the 80-class head) — zero C++ changes, wasted head compute.
-
-**Environment-reinstall episode (2026-08-28):** the OS rootfs was re-imaged (home survived). Restored via apt from the NVIDIA Jetson repo (`/etc/apt/sources.list.d/nvidia-l4t-apt-source.list` — ships with all `deb` lines commented out, must be enabled first; it then redirects to the `.cn` mirror, no proxy needed): `libnvinfer10` (**not** `libnvinfer8` — TRT 10 renamed the package) + `libnvinfer-dev` + `libnvinfer-bin` for trtexec, and `libopencv` (the JetPack OpenCV 4.8 runtime lives in a package with that exact name; `libopencv-dev` alone only installs dangling `/usr/lib/libopencv_*.so → *.so.408` symlinks). `pycocotools` reinstalled via pip. While at it, the vestigial `NvInfer.h`/`NvInferPlugin.h` includes were removed from [src/yolov5.h](src/yolov5.h) — the app uses no TensorRT symbol, so it no longer needs TRT headers to compile.
+**Environment-reinstall episode (2026-08-28/09-01):** the OS rootfs was re-imaged on the first Orin (home survived), and the second Orin's image lacked the same packages. The complete fresh-machine dependency list and one-shot install command live in the [Troubleshooting Log](#troubleshooting-log) ("Fresh/re-imaged machine" entry): TRT (`libnvinfer10` — TRT 10 renamed it), `nvidia-l4t-dla-compiler` (trtexec DLA builds need `libnvdla_compiler.so`), JetPack OpenCV 4.8 (`libopencv` runtime + `libopencv-dev`), `libjsoncpp-dev`, plus `sudo ldconfig` after install. While at it, the vestigial `NvInfer.h`/`NvInferPlugin.h` includes were removed from [src/yolov5.h](src/yolov5.h) — the app uses no TensorRT symbol, so it no longer needs TRT headers to compile.
 
 ## Architecture
 
 Pipeline: CPU (OpenCV decode + letterbox) → GPU (MatX reformat FP32→DLA input format) → **DLA (cuDLA inference)** → GPU (MatX reformat to FP16 planar + decode/NMS in `decode_nms.cu`) → CPU (bbox results). See [src/README.md](src/README.md).
 
-- [src/validate_coco.cpp](src/validate_coco.cpp) — `main()`, CLI parsing. Entry point despite the name; handles both single-image and COCO validation flows.
-- [src/yolov5.cpp](src/yolov5.cpp) / [yolov5.h](src/yolov5.h) — pipeline orchestrator. Allocates CUDA buffers, owns the cuDLA context, drives pre/post-processing. `mInputScale` (used at yolov5.cpp:239 to quantize the FP32 input to INT8) comes from the `images:` entry of `data/model/qat2ptq.cache` — update it if a new calibration cache has a different input scale. Note `mOutputScale1-3` are declared but **never used** (dead code — DLA outputs are FP16 and consumed directly). Network input is fixed at 1x3x672x672.
+- [src/validate_coco.cpp](src/validate_coco.cpp) — `main()`, CLI parsing. Entry point despite the name; handles single-image and validation flows. Image list via `--list` (default `./data/coco_val_2017_list.txt`); when `NUM_CLASSES != 80` predictions use string filename-stem image ids + identity category ids (matching `make_coco_json.py`'s GT encoding).
+- [src/yolov5.cpp](src/yolov5.cpp) / [yolov5.h](src/yolov5.h) — pipeline orchestrator. Allocates CUDA buffers, owns the cuDLA context, drives pre/post-processing. `mInputScale` (used at yolov5.cpp:239 to quantize the FP32 input to INT8) comes from the calibration cache's `images:` entry — update it if a new cache has a different input scale. `mOutputScale1-3` are declared but **never used** (dead code — DLA outputs are FP16 and consumed directly). Network input is fixed at 1x3x672x672. Class count comes from the `YOLO_NUM_CLASSES` build macro (`make NUM_CLASSES=<n>`, default 80).
 - **Two mutually exclusive cuDLA contexts** (compile-time selection in `yolov5.cpp`; comparison and selection guidance in [Hybrid vs Standalone Mode Selection](#hybrid-vs-standalone-mode-selection) below):
   - [src/cudla_context_hybrid.cpp](src/cudla_context_hybrid.cpp) — hybrid mode: CUDA-allocated buffers registered to cuDLA via `cudlaMemRegister`; task submitted on a CUDA stream. Simplest integration path.
   - [src/cudla_context_standalone.cpp](src/cudla_context_standalone.cpp) — standalone mode: NvSciBuf/NvSciSync for buffers and fences, imported into CUDA as external memory/semaphores. Avoids CUDA context creation on the DLA path; deterministic semaphore variant (`USE_DETERMINISTIC_SEMAPHORE`) is a workaround for older DriveOS/JetPack NvSciSync behavior.
   - Both context classes are intentionally self-contained (no sample dependencies) so users can copy them into their own projects — keep them that way when editing.
-- [src/matx_reformat/](src/matx_reformat/) — separate CMake library wrapping the MatX submodule (pimpl pattern: `ReformatRunner`). Converts between DLA tensor layouts and planar formats: `ReformatImage`/`ReformatImageV2` (input CHW→HWC4/CHW16), `Run`/`Transpose` (output CHW16→planar for the 3 YOLOv5 heads at strides 8/16/32).
-- [data/model/](data/model/) — trtexec scripts that compile the two ONNX models into DLA loadables. INT8 loadable uses `--inputIOFormats=int8:dla_hwc4 --outputIOFormats=fp16:chw16 --calib=qat2ptq.cache` with the last head convs forced to FP16 (`--layerPrecisions`). `build_dla_standalone_loadable_v2.sh` falls back more layers to FP16 (higher mAP, slower). Requires a trtexec with `--buildDLAStandalone` support (patch in `data/trtexec-dla-standalone-trtv8.5.patch` for TRT 8.5 / pre-JetPack-6.0).
-- [export/](export/) — training-side tooling, independent of the C++ app: `yolov5-qat/` is copied into an ultralytics yolov5 v7.0 checkout for QAT fine-tuning; `qdq_translator/` converts a QAT ONNX (Q/DQ nodes) into a PTQ ONNX + INT8 calibration cache. The server-side working copy lives at `yolov5_dla/` (v7.0 + the overlay, hardened with a CLI-parameterized `qat.py`, torch-2.x amp fixes and custom-dataset pycocotools support — see its own CLAUDE.md). The overlay is exactly 4 files: 3 new (`quantization/quantize.py`, `quantization/rules.py`, `scripts/qat.py`) + 1 modified (`models/common.py`).
+- [src/matx_reformat/](src/matx_reformat/) — separate CMake library wrapping the MatX submodule (pimpl pattern: `ReformatRunner`). Converts between DLA tensor layouts and planar formats: `ReformatImage`/`ReformatImageV2` (input CHW→HWC4/CHW16), `Run`/`Transpose` (output CHW16→planar for the 3 YOLOv5 heads at strides 8/16/32). Channel geometry derives from the same `YOLO_NUM_CLASSES` macro (CHW16/CHW32 pad head channels to multiples of 16/32).
+- [data/model/](data/model/) — trtexec scripts that compile ONNX models into DLA loadables. INT8 loadable uses `--inputIOFormats=int8:dla_hwc4 --outputIOFormats=fp16:chw16` with the last head convs forced to FP16 (`--layerPrecisions`). `build_dla_standalone_loadable_v2.sh` falls back more layers to FP16 (higher mAP, slower). Requires trtexec with `--buildDLAStandalone` (patch in `data/trtexec-dla-standalone-trtv8.5.patch` only for TRT 8.5 / pre-JetPack-6.0).
+- [export/](export/) — training-side tooling, independent of the C++ app: `yolov5-qat/` is the original overlay for an ultralytics yolov5 v7.0 checkout; `qdq_translator/` converts a QAT ONNX (Q/DQ nodes) into a PTQ ONNX + INT8 calibration cache. The server-side working copy lives at `yolov5_dla/` (v7.0 + the overlay, hardened with a CLI-parameterized `qat.py`, torch-2.x amp fixes and custom-dataset pycocotools support — see its own CLAUDE.md). The overlay is exactly 4 files: 3 new (`quantization/quantize.py`, `quantization/rules.py`, `scripts/qat.py`) + 1 modified (`models/common.py`).
 
 **What the `yolov5-qat` overlay changes in `models/common.py`** (the only modified file, ~35 lines vs upstream v7.0): every functional `torch.cat(..., 1)` in `C3TR`, `C3`, `SPP`, `SPPF`, `Focus`, `GhostConv` and `Classify` is rerouted through a `self.concat = Concat(1)` submodule. Why: `quantization/quantize.py:initialize()` with `--all-node-with-qdq` (Option#2 in [export/README.md](export/README.md)) registers `models.common.Concat → QuantConcat` (and `nn.SiLU → QuantSiLU`) in pytorch-quantization's module-replacement map — a class-based swap that is only possible because Concat is a module; functional `torch.cat` could never be replaced. DLA requires an INT8 scale on every op including Concat (on GPU, TensorRT may let concat run at higher precision; qdq_translator's `--infer_concat_scales` exists for the Option#1 path where concat has no trained scale). The change is purely structural: identical numerics, identical exported ONNX graph.
 
@@ -215,7 +40,15 @@ DLA I/O format constraints (why the MatX reformat steps exist): INT8 input must 
 
 ## Hybrid vs Standalone Mode Selection
 
-Switching mechanics are in Build & Run (compile-time flag + `make clean`). The mode does not change results, accuracy, or the loadables — only how the DLA task's memory/submission/synchronization path is wired.
+The mode is a **compile-time** switch — `make clean` is required when switching (the Makefile does not track this dependency):
+
+```bash
+make clean && make run                                    # hybrid mode (default)
+make clean && make run USE_DLA_STANDALONE_MODE=1          # standalone mode
+make clean && make run USE_DLA_STANDALONE_MODE=1 USE_DETERMINISTIC_SEMAPHORE=1   # old DriveOS/JetPack only
+```
+
+The mode does not change results, accuracy, or the loadables — only how the DLA task's memory/submission/synchronization path is wired.
 
 Facts that are easy to get wrong:
 
@@ -232,3 +65,163 @@ Facts that are easy to get wrong:
 Choose **hybrid** for quick integration in CUDA-centric apps: single process, results post-processed on GPU, DLA tasks naturally ordered with other CUDA work on the same stream. Choose **standalone** when the GPU is heavily loaded and DLA must stay decoupled from CUDA stream scheduling, when extra processes must not create CUDA contexts, or when building a zero-copy NvSci pipeline (camera/NvMedia → DLA → other modules).
 
 Resource framing: hybrid costs ≈0 GPU SM time for the inference itself but needs a CUDA context (tens of MB) and couples DLA submission to stream scheduling. AGX Orin has 2 DLA cores in their own clock/power domain, physically parallel to the GPU. Reference perf (README, bs=1): same YOLOv5s INT8 runs 1.82 ms on GPU vs 3.82 ms on DLA — DLA's value is energy efficiency and freeing the GPU for other work, not raw speed.
+
+## Pipeline A — COCO: QAT Training → DLA Deployment
+
+The original sample's line: fine-tune the official yolov5s on COCO with QAT, deploy INT8 on the DLA, validate with COCO val2017.
+
+### A0. One-time build on the Jetson
+
+```bash
+# Heavy inputs are gitignored — copy data/model/*.onnx in first (git-LFS in the original NVIDIA repo).
+bash data/model/build_dla_standalone_loadable.sh   # trtexec → INT8 + FP16 loadables into data/loadable/
+bash src/matx_reformat/build_matx_reformat.sh      # matx lib (offline via CCCL shims; auto-proxy if GitHub is needed)
+make                                               # app; NUM_CLASSES defaults to 80 for COCO
+```
+
+matx unit test: `./test` from `src/matx_reformat/build/` (with that dir on `LD_LIBRARY_PATH`). No `LD_LIBRARY_PATH` is needed for the app itself — it is linked with `-Wl,-rpath` to `src/matx_reformat/build`.
+
+### A1. Run and validate (single image / COCO val)
+
+```bash
+make run                                # single image → detections drawn to result.jpg
+make validate_cudla_int8                # COCO val2017 (5000 imgs) + pycocotools mAP, ~30–60 min
+make validate_cudla_int8 ENGINE=data/loadable/<other 80-class loadable>.bin
+
+# or directly:
+./build/cudla_yolov5_app --engine data/loadable/yolov5.int8.int8hwc4in.fp16chw16out.standalone.bin \
+    --image data/images/image.jpg --backend cudla_int8          # single image
+./build/cudla_yolov5_app --engine ... --coco_path data/coco/ --backend cudla_int8   # validation (writes predict.json)
+python3 test_coco_map.py --predict predict.json --coco data/coco/
+```
+
+Reference results: mAP50-95 **37.5** (DLA FP16) / **37.1** (DLA INT8 QAT) @ 1x3x672x672, ~5.5 ms/img INT8.
+
+### A2. Server — QAT fine-tuning on COCO
+
+Copy **only the `yolov5_dla/` directory** to a GPU server (v7.0 + hardened QAT layer; its own CLAUDE.md documents the internals). **Weight warning:** use `yolov5s.pt` (v7.0), not `yolov5su.pt` — the 'u' variant's anchors differ from the v7.0 defaults hardcoded in src/yolov5.cpp, silently corrupting decode.
+
+```bash
+cd yolov5_dla
+pip install -r requirements.txt
+pip install --no-deps --index-url https://pypi.nvidia.com pytorch-quantization && pip install absl-py prettytable
+bash data/scripts/get_coco.sh           # YOLO-format COCO → ../datasets/coco (~20GB)
+
+# Option#1 (what the repo's shipped model used); add --all-node-with-qdq for Option#2
+python scripts/qat.py quantize yolov5s.pt --ptq=ptq.pt --qat=qat.pt \
+    --cocodir=../datasets/coco --eval-origin --eval-ptq
+python scripts/qat.py export qat.pt --size=672 --save=yolov5_trimmed_qat.onnx --dynamic --noanchor
+```
+
+The script calibrates → prints Origin/PTQ baseline mAP → fine-tunes, saving the best-AP epoch to `qat.pt` (history in `summary.json`); `--iters` caps batches/epoch for dry runs; full COCO epochs take hours per GPU. `--cocodir` (dataloaders) and `data/coco.yaml`'s `path:` (evaluation) must point to the same dataset.
+
+### A3. Jetson — translate → loadable → validate (the retrain cycle)
+
+```bash
+# one-time: translator deps (torch-free)
+pip3 install -i https://pypi.tuna.tsinghua.edu.cn/simple onnx onnx_graphsurgeon nvidia-pyindex
+pip3 install -i https://pypi.tuna.tsinghua.edu.cn/simple onnxoptimizer   # no aarch64 wheel → source build ~15 min
+
+# translate: QAT ONNX (explicit Q/DQ) → PTQ ONNX + INT8 calib cache + precision config
+cd export/qdq_translator
+python3 qdq_translator.py --input_onnx_models=../../data/model/yolov5_trimmed_qat.onnx \
+    --output_dir=../../data/model/ --infer_concat_scales --infer_mul_scales
+```
+
+Then: copy [build_dla_standalone_loadable_8.26.sh](data/model/build_dla_standalone_loadable_8.26.sh) as a template, repoint its 3 paths (cache source, `_noqdq.onnx`, output `.bin`) and run it; the 3 head-conv FP16 `--layerPrecisions` stay unchanged. Compare the new cache's `images:` hex entry (big-endian IEEE-754) with `mInputScale` in src/yolov5.cpp — update if different. Finally `make` + `make validate_cudla_int8 ENGINE=...`.
+
+Reference: the completed 8.26 retrain cycle lives in the repo (`yolov5_trimmed_qat_8.26.*` → `yolov5_8.26.int8...bin`): COCO mAP50-95 = **37.1** (equal to the shipped model), identical input scale, empty `layer_arg.txt` (a maximal FP16 suggestion list — not a requirement).
+
+## Pipeline B — Custom Dataset: Train → QAT → DLA Deployment
+
+End-to-end from your own dataset. Worked example in the repo: the 3-class model (`data/model/yolov5_3clases_qat*`, verified 2026-08-28: 8 detections @ 3.74 ms/img).
+
+**①–⑤ Server — data prep, FP32 training, QAT fine-tune, ONNX export.** Run these inside the `yolov5_dla` toolkit; the detailed commands (environment setup, single/multi-GPU training, optional COCO-json GT generation, PTQ+QAT, export) are documented in [yolov5_dla/CLAUDE.md](yolov5_dla/CLAUDE.md) — follow that doc, then bring back **only the exported `.onnx`** to the Jetson's `data/model/`. Two deployment-critical points from the server side: train at `--imgsz 672` (matches the fixed deployment input), and watch the autoanchor log — if training replaces the anchors they must be synced into `anchors[]` in src/yolov5.cpp (step ⑧).
+
+**⑥ Jetson — translate** (graph-level, dataset-agnostic; same deps and flags as A3):
+
+```bash
+cd export/qdq_translator
+python3 qdq_translator.py --input_onnx_models=../../data/model/mydata_qat.onnx \
+    --output_dir=../../data/model/ --infer_concat_scales --infer_mul_scales
+```
+
+Then compare the new cache's `images:` hex entry with `mInputScale` in src/yolov5.cpp — update if different. (`layer_arg.txt` empty is fine.)
+
+**⑦ Jetson — build the loadable.** Copy [build_dla_standalone_loadable_3classes.sh](data/model/build_dla_standalone_loadable_3classes.sh), repoint its 3 paths (cache source, `_noqdq.onnx`, output `.bin`), run it. The 3 head-conv FP16 `--layerPrecisions` stay as-is (nc-independent node names).
+
+**⑧ Jetson — build with the right class count** (nc is a build flag — no source edits):
+
+```bash
+NUM_CLASSES=<nc> bash src/matx_reformat/build_matx_reformat.sh   # rebuild the matx lib
+make clean && make NUM_CLASSES=<nc>
+```
+
+`NUM_CLASSES` defaults to 80 (the shipped COCO model). It drives buffer sizes, the decode call sites and the CHW16/CHW32 reformat group dims (`YOLO_NUM_CLASSES` macro in [src/yolov5.cpp](src/yolov5.cpp) and [matx_reformat.cu](src/matx_reformat/matx_reformat.cu); `decode_nms.cu` is parameterized). **The flag must match the loadable passed to `--engine`/`ENGINE=`** — a mismatch silently garbage-results. Also: `anchors[]` in yolov5.cpp — only if training (①–⑤) replaced them; `mInputScale` — only if ⑥ found a different value.
+
+**⑨ Jetson — run and verify:**
+
+```bash
+# single image (detections drawn to result.jpg)
+./build/cudla_yolov5_app --engine data/loadable/mydata.int8...bin --image your.jpg --backend cudla_int8
+# or: make run ENGINE=... IMAGE=...
+```
+
+Accuracy verdict — two options: server-side `val.py` mAP, or **on-device COCO-style eval for custom datasets** (verified 2026-08-31, 3-class model: mAP50-95 **0.466** @ 4356 images):
+
+```bash
+# GT json from YOLO txt labels (torch-free)
+python3 yolov5_dla/scripts/make_coco_json.py --cocodir /path/to/ds --data <yaml> --val-list <list.txt>
+# inference over the val list (predictions auto-switch to string ids + identity categories when nc != 80)
+./build/cudla_yolov5_app --engine ... --coco_path /path/to/ds --list /path/to/ds/<list.txt> --backend cudla_int8
+python3 test_coco_map.py --predict predict.json --coco /path/to/ds
+```
+
+If boxes look systematically wrong on in-domain images, compare the checkpoint's `model.model[-1].anchors` against yolov5.cpp's `anchors[]`.
+
+Lazy alternative for experiments only: map custom classes into unused COCO slots (keep the 80-class head) — zero C++ changes, wasted head compute.
+
+## Troubleshooting Log
+
+Problems actually hit on these machines, with symptom → cause → fix.
+
+**Build (Jetson)**
+
+- trtexec INT8 build fails: *"Calibration table does not match calibrator algorithm type"* then *"Tensor `images` is bound to nullptr"* — TRT 10.x rejects the repo's `TRT-8600-EntropyCalibration2` cache header and tries to recalibrate with no data. Fix: the build scripts `sed` the header to the local TRT version into `data/loadable/*.cache` before `--calib`.
+- trtexec logs `kPREFER_PRECISION_CONSTRAINTS cannot be set if kOBEY_PRECISION_CONSTRAINTS is set` — harmless TRT 10.3 noise; obey stays in effect, build succeeds.
+- MatX configure fails cloning `libcudacxx` from GitHub — direct GitHub access is unreliable; `build_matx_reformat.sh` auto-routes through the LAN proxy when a direct probe fails. With the CCCL shim below the build needs no network at all.
+- MatX 0.4.1 vs CUDA 12.6: NVTX v1-vs-v3 `#error` and missing `<__config>` — MatX fetches libcudacxx 2.1.0 which clashes with the toolkit's CCCL. Fix: [src/matx_reformat/compat/](src/matx_reformat/compat/) shims (`libcudacxx-shim/include` symlinks to `/usr/local/cuda/include` via `FETCHCONTENT_SOURCE_DIR_LIBCUDACXX`; `nvtx-shim/nvToolsExt.h` redirects to the nvtx3 drop-in). If a fetch failed before the shims existed, `rm -rf src/matx_reformat/build` first.
+- `nvscibuf.h: No such file or directory` — JetPack ships NvSci runtime libs only, no dev headers. Fix: headers restored from the public DRIVE OS 6.0.9 doxygen `_source.html` pages into [compat/nvsci-headers/](compat/nvsci-headers/) (Makefile adds `-I ./compat/nvsci-headers`).
+- `ld: cannot find -lnvscibuf` — the libs live in `/usr/lib/aarch64-linux-gnu/nvidia/`; the Makefile adds `-L` (standalone mode only).
+- Running the binary directly fails with `libmatx_reformat.so: cannot open shared object file` — the Makefile's `export LD_LIBRARY_PATH` only applies to make's children. Fix: the link now bakes in `-Wl,-rpath` → no env var needed.
+- Fresh/re-imaged machine — enable the commented `deb` lines in `/etc/apt/sources.list.d/nvidia-l4t-apt-source.list` first (it then redirects to the `.cn` mirror, no proxy needed), then install the full dependency set at once:
+
+  ```bash
+  sudo apt update && sudo apt install -y \
+      libnvinfer10 libnvinfer-dev libnvinfer-bin \
+      nvidia-l4t-dla-compiler \
+      libopencv libopencv-dev \
+      libjsoncpp-dev
+  sudo ldconfig
+  ```
+
+  Why each: `libnvinfer10` (TRT 10 renamed it — `libnvinfer8` does not exist) + `libnvinfer-bin` = trtexec; `nvidia-l4t-dla-compiler` provides `libnvdla_compiler.so` — without it trtexec DLA builds die at startup with *"Unable to open library: libnvinfer_plugin.so.10 due to libnvdla_compiler.so"*; `libopencv` is the JetPack OpenCV 4.8 runtime body (`libopencv-dev` alone leaves dangling `/usr/lib/libopencv_*.so → *.so.408` symlinks → link failure); `libjsoncpp-dev` = `json/json.h`. If a freshly installed lib still reports "cannot open shared object file", run `sudo ldconfig` (the NVIDIA lib dir `/usr/lib/aarch64-linux-gnu/nvidia` is already registered in `nvidia-tegra.conf`; apt does not always refresh the cache). `pycocotools` comes via pip.
+
+**Python environment**
+
+- `pip install pytorch-quantization` → placeholder error / `sphinx-glpi-theme` unresolvable — the README's `pypi.ngc.nvidia.com` index is dead, PyPI hosts a same-name placeholder, and the real NVIDIA wheel declares a docs theme as a runtime dep. Fix: `pip install --no-deps --index-url https://pypi.nvidia.com pytorch-quantization && pip install absl-py prettytable`.
+- `onnxoptimizer` has no aarch64 wheel — pip falls back to a silent ~15-min source build (cmake 3.22 suffices); the `==0.3.2` pin in requirements.txt is not load-bearing (only 4 passes are used, all present in 0.3.13).
+- Installing onnx raises user-site numpy to 2.2.6 — pycocotools verified still working; if some package later complains about numpy ABI: `pip install "numpy<2"`.
+
+**Training (server)**
+
+- `yolov5su.pt` loads fine but decodes garbage on-device — 'u'-variant anchors differ from the v7.0 defaults hardcoded in src/yolov5.cpp. Always start from `yolov5s.pt`.
+- Side-printed pycocotools AP ≈ 0.001 while yolov5's own table shows normal mAP — non-COCO dataset roots make upstream `save_one_json` write contiguous category ids. Fixed in yolov5_dla (`is_coco`-aware ids, `--save-json` opt-in, `make_coco_json.py` for COCO-format GT).
+- `--cocodir` and the eval yaml's `path:` must point to the same dataset or val loads no images.
+
+**Accuracy / runtime**
+
+- **mAP ≈ 0.01 and objects missing** (e.g. bus not detected) — the app was built with a `NUM_CLASSES` that doesn't match the loadable (hit when an 80-class loadable ran against a 3-class build). Rebuild both libs with the matching `NUM_CLASSES` (see Pipeline B ⑧).
+- `mOutputScale1-3` look like they need updating on retrain — they are dead code; only `mInputScale` (cache `images:` entry) is used.
+- The app prepends `--coco_path` to every list entry — keep list entries relative (or absolute, now also supported); pass `--list` for non-COCO lists.
+- Custom-dataset eval mismatch: the app's `coco80_to_coco91_class` map only applies when `NUM_CLASSES == 80`; custom models use identity ids + string image ids to match `make_coco_json.py`.

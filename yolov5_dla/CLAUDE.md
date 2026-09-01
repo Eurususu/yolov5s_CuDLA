@@ -97,6 +97,10 @@ python scripts/qat.py test yolov5s.pt --cocodir datasets/coco
 
 ### How the pieces fit
 
+> A deep-dive on the QAT principles and a code walkthrough of all four stages
+> (module replacement → calibration → STE-based distillation fine-tune → Q/DQ export)
+> lives in [docs/qat-internals.zh-CN.md](docs/qat-internals.zh-CN.md) (Chinese).
+
 - `quantize.replace_to_quantization_module()` swaps `nn.Conv2d`/`MaxPool2d`/`Linear` for `QuantConv2d`/... by walking `_DEFAULT_QUANT_MAP`; `replace_bottleneck_forward()` patches `Bottleneck.forward` to route the residual add through `QuantAdd` (the add op needs explicit input quantizers). Ordering matters: `replace_bottleneck_forward` → `replace_to_quantization_module` → (`apply_custom_rules_to_quantizer` unless `--all-node-with-qdq`) → `calibrate_model`.
 - `quantization/rules.py` parses the intermediate ONNX graph to find conv pairs feeding the same Concat/MaxPool and shares one input quantizer between them (TensorRT Q/DQ folding requirement); it also ties `Bottleneck.addop` quantizers to `cv1`'s.
 - Calibration feeds `num_batch=25` batches (images `/255`, no augment beyond the loader), then `load_calib_amax(method="mse")`.

@@ -95,6 +95,9 @@ python scripts/qat.py test yolov5s.pt --cocodir datasets/coco
 
 ### 各部分如何协作
 
+> 关于 QAT 原理与代码的深度剖析（模块替换 → 校准 → 基于 STE 的蒸馏式微调 → Q/DQ 导出
+> 四阶段的逐行讲解），见独立文档 [docs/qat-internals.zh-CN.md](docs/qat-internals.zh-CN.md)。
+
 - `quantize.replace_to_quantization_module()` 按 `_DEFAULT_QUANT_MAP` 遍历，把 `nn.Conv2d`/`MaxPool2d`/`Linear` 换成 `QuantConv2d`/...；`replace_bottleneck_forward()` 给 `Bottleneck.forward` 打补丁，让残差加法经过 `QuantAdd`（加法算子需要显式的输入量化器）。顺序很重要：`replace_bottleneck_forward` → `replace_to_quantization_module` →（除非 `--all-node-with-qdq`，否则 `apply_custom_rules_to_quantizer`）→ `calibrate_model`。
 - `quantization/rules.py` 解析中间 ONNX 图，找到喂入同一个 Concat/MaxPool 的卷积对，并在它们之间共享同一个输入量化器（TensorRT Q/DQ 折叠的要求）；同时把 `Bottleneck.addop` 的量化器绑定到 `cv1` 的。
 - 校准喂入 `num_batch=25` 个批次（图像 `/255`，除 loader 自身外无增强），然后 `load_calib_amax(method="mse")`。

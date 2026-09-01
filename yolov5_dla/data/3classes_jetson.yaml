@@ -1,0 +1,12 @@
+path: /media/data/jia/3classes  # GT json for --save-json lives at <path>/annotations/instances_val2017.json
+train:
+val:
+  - val_all.txt
+test:
+
+nc: 3
+
+names:
+  0: person
+  1: car
+  2: bike

@@ -167,7 +167,7 @@ make clean && make NUM_CLASSES=<nc>
 # 或：make run ENGINE=... IMAGE=...
 ```
 
-精度验收 —— 三种方式：服务器端 `val.py` 的 mAP、**自定义数据集的设备端 COCO 式评测**（2026-08-31 已验证，三分类模型：mAP50-95 **0.466**，4356 张图）、或用 `yolov5_dla/scripts/eval_pt_coco.py` 做 checkpoint 级评估（本机已装 torch 可直接跑；qat.pt 以伪量化生效方式加载，见脚本头部说明）。**三分类模型的归因基线（同 4356 张、pycocotools）：FP32 0.482 → QAT 0.478 → DLA INT8 0.466** —— 即 QAT 损失 0.4 点、部署损失 1.2 点；yolov5 原生与 pycocotools 之间约 1.8 点的方法学差异（pycocotools 更严格）加上验证集差异，就构成了与训练日志对比时出现的"大差距"。注意：给 python 评估器的图片列表必须用**绝对路径**（yolov5 的 dataloader 按当前目录解析相对路径）—— C++ 端 / make_coco_json 继续用相对版 `val_all.txt`，python 用绝对版 `val_abs.txt`：
+精度验收 —— 三种方式：服务器端 `val.py` 的 mAP、**自定义数据集的设备端 COCO 式评测**（2026-08-31 已验证，三分类模型：mAP50-95 **0.466**，4356 张图）、或用 `yolov5_dla/scripts/eval_pt_coco.py` 做 checkpoint 级评估（本机已装 torch 可直接跑；qat.pt 以伪量化生效方式加载，见脚本头部说明）。**三分类模型的归因基线（同 4356 张、pycocotools）：FP32 0.482 → QAT 0.478 → DLA INT8 0.466** —— 即 QAT 损失 0.4 点、部署损失 1.2 点；yolov5 原生与 pycocotools 之间约 1.8 点的方法学差异（pycocotools 更严格）加上验证集差异，就构成了与训练日志对比时出现的"大差距"。注意：yolov5 的 dataloader 按当前工作目录解析图片列表条目 —— `eval_pt_coco.py` 会自动把相对条目改写为绝对路径（相对 `--cocodir` 解析，生成 `*_abs.txt`），因此同一份相对列表在所有环节通用：
 
 ```bash
 # 从 YOLO txt 标签生成 GT json（无需 torch）

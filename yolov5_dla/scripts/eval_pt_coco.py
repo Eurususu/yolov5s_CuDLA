@@ -46,6 +46,24 @@ def load_checkpoint(weight, device):
     return model
 
 
+def absolutize_lists(cocodir, lists):
+    """yolov5's dataloader opens list entries relative to the CWD, so relative
+    entries must be rewritten absolute (against cocodir) before use. Writes
+    <name>_abs.txt next to the original and returns the new list names."""
+    out = []
+    for name in lists:
+        src = Path(cocodir) / name
+        entries = [l.strip() for l in open(src) if l.strip()]
+        if all(e.startswith("/") for e in entries):
+            out.append(name)
+            continue
+        abs_name = src.stem + "_abs.txt"
+        with open(Path(cocodir) / abs_name, "w") as f:
+            f.write("\n".join(e if e.startswith("/") else str(Path(cocodir) / e) for e in entries) + "\n")
+        out.append(abs_name)
+    return out
+
+
 def main():
     parser = argparse.ArgumentParser(prog="eval_pt_coco.py")
     parser.add_argument("--weights", type=str, nargs="+", required=True,
@@ -68,8 +86,9 @@ def main():
                  f"--val-list {' '.join(args.val_list)}")
 
     device = torch.device(args.device)
+    val_lists = absolutize_lists(args.cocodir, args.val_list)
     loader = create_coco_val_dataloader(args.cocodir, batch_size=args.batch_size,
-                                        imgsz=args.imgsz, val_list=args.val_list)
+                                        imgsz=args.imgsz, val_list=val_lists)
 
     for w in args.weights:
         model = load_checkpoint(w, device)

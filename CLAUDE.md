@@ -12,7 +12,7 @@ NVIDIA sample deploying a QAT (quantization-aware trained) YOLOv5s on the Orin D
 - **OS:** Ubuntu 22.04.5 LTS, L4T R36.5.2 = JetPack 6.2.3, kernel `5.15.185-tegra`, aarch64.
 - **Toolchain:** CUDA 12.6 (`/usr/local/cuda`, nvcc targets sm_87), gcc 11.4.0, cmake 3.22.1.
 - **Libraries:** TensorRT 10.3.0.30 (`libnvinfer-dev`, trtexec at `/usr/src/tensorrt/bin/trtexec`), cuDLA (`/usr/local/cuda/lib64/libcudla.so`), OpenCV 4.8.0 (apt), `nvidia-l4t-nvsci` 36.5.2 — NvSci runtime libs only, no dev headers (hence [compat/nvsci-headers/](compat/nvsci-headers/)).
-- **Python:** 3.10.12 with pycocotools installed (mAP evaluation ready).
+- **Python:** 3.10.12 with pycocotools installed (mAP evaluation ready). **PyTorch 2.5.0a0+nv24.08 (JetPack 6.1 build) is installed** — in `/media/data/jia/pylib` (registered via `~/.local/lib/python3.10/site-packages/torch_nvme.pth`), so `import torch` works from any `python3`; source-built torchvision 0.20.0 with CUDA ops alongside. Enables running `yolov5_dla` evaluation (val / eval_pt_coco.py) on-device. See the Troubleshooting Log entry "PyTorch on the Jetson" for how it was installed.
 - **Data:** COCO val2017 at `/media/data/jia/coco` (symlinked from `data/coco`); custom 3-class dataset at `/media/data/jia/3classes`. Both gitignored.
 - **Network:** GitHub only reliably reachable via LAN proxy `http://192.168.11.61:7890`.
 - **Python (export tooling):** fully installed and verified — see [Pipeline A](#pipeline-a--coco-qat-training--dla-deployment) for install commands and [Troubleshooting Log](#troubleshooting-log) for the traps. `torch` is not installed (only needed for QAT fine-tuning).
@@ -167,7 +167,7 @@ make clean && make NUM_CLASSES=<nc>
 # or: make run ENGINE=... IMAGE=...
 ```
 
-Accuracy verdict — two options: server-side `val.py` mAP, or **on-device COCO-style eval for custom datasets** (verified 2026-08-31, 3-class model: mAP50-95 **0.466** @ 4356 images):
+Accuracy verdict — three options: server-side `val.py` mAP, **on-device COCO-style eval for custom datasets** (verified 2026-08-31, 3-class model: mAP50-95 **0.466** @ 4356 images), or checkpoint-level eval with `yolov5_dla/scripts/eval_pt_coco.py` (works on-device now that torch is installed; loads qat.pt with fake-quant active — see its header). **Attribution baseline for the 3-class model (same 4356 imgs, pycocotools): FP32 0.482 → QAT 0.478 → DLA INT8 0.466** — i.e. QAT costs 0.4 pt, deployment 1.2 pt; a yolov5-native-vs-pycocotools gap of ~1.8 pt (pycocotools stricter) and val-set differences account for the rest of any "big gap" vs training logs. Note: image lists for the python evaluator must contain ABSOLUTE paths (yolov5's dataloader opens them relative to cwd) — keep `val_all.txt` relative for the C++ app / make_coco_json and a `val_abs.txt` variant for python.
 
 ```bash
 # GT json from YOLO txt labels (torch-free)
@@ -208,6 +208,26 @@ Problems actually hit on these machines, with symptom → cause → fix.
   Why each: `libnvinfer10` (TRT 10 renamed it — `libnvinfer8` does not exist) + `libnvinfer-bin` = trtexec; `nvidia-l4t-dla-compiler` provides `libnvdla_compiler.so` — without it trtexec DLA builds die at startup with *"Unable to open library: libnvinfer_plugin.so.10 due to libnvdla_compiler.so"*; `libopencv` is the JetPack OpenCV 4.8 runtime body (`libopencv-dev` alone leaves dangling `/usr/lib/libopencv_*.so → *.so.408` symlinks → link failure); `libjsoncpp-dev` = `json/json.h`. If a freshly installed lib still reports "cannot open shared object file", run `sudo ldconfig` (the NVIDIA lib dir `/usr/lib/aarch64-linux-gnu/nvidia` is already registered in `nvidia-tegra.conf`; apt does not always refresh the cache). `pycocotools` comes via pip.
 
 **Python environment**
+
+- **PyTorch on the Jetson** (done 2026-09-01, rootfs had only ~7 GB free → everything on the NVMe): Jetson torch wheels are NOT on `pypi.nvidia.com` — the official build lives in NVIDIA's redist repo:
+  ```bash
+  # 1. torch (wheel filename must stay canonical — renaming breaks pip's tag parsing)
+  curl -L -o torch-2.5.0a0+872d972e41.nv24.08.17622132-cp310-cp310-linux_aarch64.whl \
+    "https://developer.download.nvidia.com/compute/redist/jp/v61/pytorch/torch-2.5.0a0+872d972e41.nv24.08.17622132-cp310-cp310-linux_aarch64.whl"   # ~770MB; via proxy if the .cn mirror throttles
+  python3 -m pip install --no-cache-dir --target /media/data/jia/pylib <wheel>   # deps from a CN mirror
+  echo /media/data/jia/pylib > ~/.local/lib/python3.10/site-packages/torch_nvme.pth
+  # 2. torchvision — PyPI wheels are ABI-incompatible with nv torch builds ("operator torchvision::nms does not exist") → build from source:
+  curl -L -o vision-0.20.0.tar.gz https://github.com/pytorch/vision/archive/refs/tags/v0.20.0.tar.gz   # via proxy
+  tar xf vision-0.20.0.tar.gz && cd vision-0.20.0
+  TORCH_CUDA_ARCH_LIST="8.7" FORCE_CUDA=1 MAX_JOBS=4 \
+    python3 -m pip install --no-deps --no-build-isolation --target /media/data/jia/pylib .   # ~10 min
+  # 3. missing lib: torch import fails with libcusparseLt.so.0 not found →
+  python3 -m pip install --no-deps --target /media/data/jia/pylib nvidia-cusparselt-cu12==0.6.3
+  ln -s /media/data/jia/pylib/cusparselt/lib/libcusparseLt.so.0 /media/data/jia/pylib/torch/lib/
+  # 4. numpy must stay <2 (the nv build is compiled against numpy 1.x; PyPI sdists don't exist for new torchvision — hence GitHub)
+  python3 -m pip install "numpy==1.26.4" "opencv-python==4.10.0.84"   # opencv 5.x forces numpy>=2 — pin it
+  # 5. yolov5 runtime extras: tqdm ipython requests (system pandas/matplotlib work with numpy 1.26)
+  ```
 
 - `pip install pytorch-quantization` → placeholder error / `sphinx-glpi-theme` unresolvable — the README's `pypi.ngc.nvidia.com` index is dead, PyPI hosts a same-name placeholder, and the real NVIDIA wheel declares a docs theme as a runtime dep. Fix: `pip install --no-deps --index-url https://pypi.nvidia.com pytorch-quantization && pip install absl-py prettytable`.
 - `onnxoptimizer` has no aarch64 wheel — pip falls back to a silent ~15-min source build (cmake 3.22 suffices); the `==0.3.2` pin in requirements.txt is not load-bearing (only 4 passes are used, all present in 0.3.13).

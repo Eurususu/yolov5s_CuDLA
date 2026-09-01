@@ -12,7 +12,7 @@ NVIDIA 官方示例：将 QAT（量化感知训练）后的 YOLOv5s 部署到 Or
 - **系统：** Ubuntu 22.04.5 LTS，L4T R36.5.2 = JetPack 6.2.3，内核 `5.15.185-tegra`，aarch64。
 - **工具链：** CUDA 12.6（`/usr/local/cuda`，nvcc 目标 sm_87）、gcc 11.4.0、cmake 3.22.1。
 - **库：** TensorRT 10.3.0.30（`libnvinfer-dev`，trtexec 位于 `/usr/src/tensorrt/bin/trtexec`）、cuDLA（`/usr/local/cuda/lib64/libcudla.so`）、OpenCV 4.8.0（apt 版）、`nvidia-l4t-nvsci` 36.5.2 —— 仅运行库、无开发头文件（因此才有 [compat/nvsci-headers/](compat/nvsci-headers/)）。
-- **Python：** 3.10.12，已装 pycocotools（mAP 评估就绪）。
+- **Python：** 3.10.12，已装 pycocotools（mAP 评估就绪）。**PyTorch 2.5.0a0+nv24.08（JetPack 6.1 构建）已安装** —— 位于 `/media/data/jia/pylib`（经 `~/.local/lib/python3.10/site-packages/torch_nvme.pth` 注册，任何 `python3` 直接 `import torch`），配源码编译的 torchvision 0.20.0（含 CUDA 算子）。可在本机跑 `yolov5_dla` 的评估（val / eval_pt_coco.py）。安装过程见「问题记录」的"Jetson 上的 PyTorch"条目。
 - **数据：** COCO val2017 在 `/media/data/jia/coco`（`data/coco` 软链指向它）；自定义三分类数据集在 `/media/data/jia/3classes`。均被 gitignore。
 - **网络：** GitHub 仅能通过局域网代理 `http://192.168.11.61:7890` 稳定访问。
 - **Python（export 工具链）：** 已完整安装并验证 —— 安装命令见「线路 A」，踩坑记录见「问题记录」。`torch` 未安装（仅 QAT 微调需要）。
@@ -167,7 +167,7 @@ make clean && make NUM_CLASSES=<nc>
 # 或：make run ENGINE=... IMAGE=...
 ```
 
-精度验收 —— 两种方式：服务器端 `val.py` 的 mAP，或**自定义数据集的设备端 COCO 式评测**（2026-08-31 已验证，三分类模型：mAP50-95 **0.466**，4356 张图）：
+精度验收 —— 三种方式：服务器端 `val.py` 的 mAP、**自定义数据集的设备端 COCO 式评测**（2026-08-31 已验证，三分类模型：mAP50-95 **0.466**，4356 张图）、或用 `yolov5_dla/scripts/eval_pt_coco.py` 做 checkpoint 级评估（本机已装 torch 可直接跑；qat.pt 以伪量化生效方式加载，见脚本头部说明）。**三分类模型的归因基线（同 4356 张、pycocotools）：FP32 0.482 → QAT 0.478 → DLA INT8 0.466** —— 即 QAT 损失 0.4 点、部署损失 1.2 点；yolov5 原生与 pycocotools 之间约 1.8 点的方法学差异（pycocotools 更严格）加上验证集差异，就构成了与训练日志对比时出现的"大差距"。注意：给 python 评估器的图片列表必须用**绝对路径**（yolov5 的 dataloader 按当前目录解析相对路径）—— C++ 端 / make_coco_json 继续用相对版 `val_all.txt`，python 用绝对版 `val_abs.txt`：
 
 ```bash
 # 从 YOLO txt 标签生成 GT json（无需 torch）
@@ -208,6 +208,26 @@ python3 test_coco_map.py --predict predict.json --coco /path/to/ds
   各包的作用：`libnvinfer10`（TRT 10 改了包名，没有 `libnvinfer8`）+ `libnvinfer-bin` = trtexec；`nvidia-l4t-dla-compiler` 提供 `libnvdla_compiler.so` —— 缺了它 trtexec 的 DLA 构建启动即死（*"Unable to open library: libnvinfer_plugin.so.10 due to libnvdla_compiler.so"*）；`libopencv` 是 JetPack OpenCV 4.8 运行库本体（只装 `libopencv-dev` 会留悬空 `/usr/lib/libopencv_*.so → *.so.408` 软链 → 链接失败）；`libjsoncpp-dev` = `json/json.h`。若装完仍报 "cannot open shared object file"，执行 `sudo ldconfig`（NVIDIA 库目录 `/usr/lib/aarch64-linux-gnu/nvidia` 已登记在 `nvidia-tegra.conf`，但 apt 不总是自动刷新缓存）。pycocotools 用 pip 装。
 
 **Python 环境**
+
+- **Jetson 上的 PyTorch**（2026-09-01 完成，根分区只剩约 7GB → 全部装到 NVMe）：Jetson 版 torch wheel **不在** `pypi.nvidia.com` —— 官方构建在 NVIDIA 的 redist 仓库：
+  ```bash
+  # 1. torch（wheel 文件名必须保持原样 —— 重命名会破坏 pip 的标签解析）
+  curl -L -o torch-2.5.0a0+872d972e41.nv24.08.17622132-cp310-cp310-linux_aarch64.whl \
+    "https://developer.download.nvidia.com/compute/redist/jp/v61/pytorch/torch-2.5.0a0+872d972e41.nv24.08.17622132-cp310-cp310-linux_aarch64.whl"   # 约770MB；.cn 镜像限速时走代理
+  python3 -m pip install --no-cache-dir --target /media/data/jia/pylib <wheel>   # 依赖走国内镜像
+  echo /media/data/jia/pylib > ~/.local/lib/python3.10/site-packages/torch_nvme.pth
+  # 2. torchvision —— PyPI 的 wheel 与 nv 版 torch ABI 不兼容（"operator torchvision::nms does not exist"）→ 源码编译：
+  curl -L -o vision-0.20.0.tar.gz https://github.com/pytorch/vision/archive/refs/tags/v0.20.0.tar.gz   # 走代理
+  tar xf vision-0.20.0.tar.gz && cd vision-0.20.0
+  TORCH_CUDA_ARCH_LIST="8.7" FORCE_CUDA=1 MAX_JOBS=4 \
+    python3 -m pip install --no-deps --no-build-isolation --target /media/data/jia/pylib .   # 约 10 分钟
+  # 3. 缺库：torch 导入报 libcusparseLt.so.0 找不到 →
+  python3 -m pip install --no-deps --target /media/data/jia/pylib nvidia-cusparselt-cu12==0.6.3
+  ln -s /media/data/jia/pylib/cusparselt/lib/libcusparseLt.so.0 /media/data/jia/pylib/torch/lib/
+  # 4. numpy 必须保持 <2（nv 构建按 numpy 1.x 编译；新版 torchvision 的 PyPI 源码包不存在 —— 所以从 GitHub 取）
+  python3 -m pip install "numpy==1.26.4" "opencv-python==4.10.0.84"   # opencv 5.x 会强制 numpy>=2 —— 锁版本
+  # 5. yolov5 运行时补充依赖：tqdm ipython requests（系统的 pandas/matplotlib 在 numpy 1.26 下可用）
+  ```
 
 - `pip install pytorch-quantization` 报占位包错误 / `sphinx-glpi-theme` 无法解析 —— README 的 `pypi.ngc.nvidia.com` 源已废弃、PyPI 有同名占位包、NVIDIA 官方包错标文档主题为运行时依赖。解法：`pip install --no-deps --index-url https://pypi.nvidia.com pytorch-quantization && pip install absl-py prettytable`。
 - `onnxoptimizer` 无 aarch64 wheel —— pip 自动转源码编译，约 15 分钟静默无输出（系统 cmake 3.22 够用）；requirements.txt 的 `==0.3.2` 锁不关键（只用到 4 个 pass，0.3.13 全有）。

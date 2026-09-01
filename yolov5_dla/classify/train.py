@@ -27,7 +27,7 @@ import torch.distributed as dist
 import torch.hub as hub
 import torch.optim.lr_scheduler as lr_scheduler
 import torchvision
-from torch.cuda import amp
+# amp: use torch.amp.* (torch.cuda.amp is deprecated since 2.4)
 from tqdm import tqdm
 
 FILE = Path(__file__).resolve()
@@ -161,7 +161,7 @@ def train(opt, device):
     t0 = time.time()
     criterion = smartCrossEntropyLoss(label_smoothing=opt.label_smoothing)  # loss function
     best_fitness = 0.0
-    scaler = amp.GradScaler(enabled=cuda)
+    scaler = torch.amp.GradScaler("cuda", enabled=cuda)
     val = test_dir.stem  # 'val' or 'test'
     LOGGER.info(f'Image sizes {imgsz} train, {imgsz} test\n'
                 f'Using {nw * WORLD_SIZE} dataloader workers\n'
@@ -180,7 +180,7 @@ def train(opt, device):
             images, labels = images.to(device, non_blocking=True), labels.to(device)
 
             # Forward
-            with amp.autocast(enabled=cuda):  # stability issues when enabled
+            with torch.amp.autocast("cuda", enabled=cuda):  # stability issues when enabled
                 loss = criterion(model(images), labels)
 
             # Backward

@@ -28,7 +28,7 @@ from copy import deepcopy
 # PyTorch
 import torch
 import torch.optim as optim
-from torch.cuda import amp
+# amp: use torch.amp.* (torch.cuda.amp is deprecated since 2.4)
 
 # Pytorch Quantization
 from pytorch_quantization import nn as quant_nn
@@ -320,7 +320,7 @@ def finetune(
     model.train()
     model.requires_grad_(True)
 
-    scaler       = amp.GradScaler(enabled=fp16)
+    scaler       = torch.amp.GradScaler("cuda", enabled=fp16)
     optimizer    = optim.Adam(model.parameters(), learningrate)
     quant_lossfn = torch.nn.MSELoss()
     device       = next(model.parameters()).device
@@ -374,7 +374,7 @@ def finetune(
                 imgs = preprocess(imgs)
                 
             imgs = imgs.to(device)
-            with amp.autocast(enabled=fp16):
+            with torch.amp.autocast("cuda", enabled=fp16):
                 model(imgs)
 
                 with torch.no_grad():

@@ -23,7 +23,7 @@ import torch
 import torch.nn as nn
 from IPython.display import display
 from PIL import Image
-from torch.cuda import amp
+# amp: use torch.amp.* (torch.cuda.amp is deprecated since 2.4)
 
 from utils import TryExcept
 from utils.dataloaders import exif_transpose, letterbox
@@ -675,7 +675,7 @@ class AutoShape(nn.Module):
             p = next(self.model.parameters()) if self.pt else torch.empty(1, device=self.model.device)  # param
             autocast = self.amp and (p.device.type != 'cpu')  # Automatic Mixed Precision (AMP) inference
             if isinstance(ims, torch.Tensor):  # torch
-                with amp.autocast(autocast):
+                with torch.amp.autocast("cuda", enabled=autocast):
                     return self.model(ims.to(p.device).type_as(p), augment=augment)  # inference
 
             # Pre-process

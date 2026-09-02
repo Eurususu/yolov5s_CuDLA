@@ -15,7 +15,7 @@ NVIDIA 官方示例：将 QAT（量化感知训练）后的 YOLOv5s 部署到 Or
 - **Python：** 3.10.12，已装 pycocotools（mAP 评估就绪）。**PyTorch 2.5.0a0+nv24.08（JetPack 6.1 构建）已安装** —— 位于 `/media/data/jia/pylib`（经 `~/.local/lib/python3.10/site-packages/torch_nvme.pth` 注册，任何 `python3` 直接 `import torch`），配源码编译的 torchvision 0.20.0（含 CUDA 算子）。可在本机跑 `yolov5_dla` 的评估（val / eval_pt_coco.py）。安装过程见「问题记录」的"Jetson 上的 PyTorch"条目。
 - **数据：** COCO val2017 在 `/media/data/jia/coco`（`data/coco` 软链指向它）；自定义三分类数据集在 `/media/data/jia/3classes`。均被 gitignore。
 - **网络：** GitHub 仅能通过局域网代理 `http://192.168.11.61:7890` 稳定访问。
-- **Python（export 工具链）：** 已完整安装并验证 —— 安装命令见「线路 A」，踩坑记录见「问题记录」。`torch` 未安装（仅 QAT 微调需要）。
+- **Python（export 工具链）：** 已完整安装并验证 —— 安装命令见「线路 A」，踩坑记录见「问题记录」。`torch` 已安装（见上）—— 仅 QAT 微调仍需 GPU 服务器。
 - **重型产物（`*.onnx`、`*.pt`、loadable、数据集）均被 gitignore** —— 新克隆的仓库需先拷入，或按下面两条流水线重新生成。
 
 **系统重装事件（2026-08-28 / 09-01）：** 第一台 Orin 重刷过根文件系统（/home 保留），第二台 Orin 的镜像缺的是同一批包。完整的新机器依赖清单与一键安装命令见「问题记录」的"全新/重刷机器"条目：TRT（`libnvinfer10`，TRT 10 改了包名）、`nvidia-l4t-dla-compiler`（trtexec 的 DLA 构建需要 `libnvdla_compiler.so`）、JetPack OpenCV 4.8（`libopencv` 运行库 + `libopencv-dev`）、`libjsoncpp-dev`，装完跑一次 `sudo ldconfig`。顺手把 [src/yolov5.h](src/yolov5.h) 里遗留的 `NvInfer.h`/`NvInferPlugin.h` include 删了 —— 应用未使用任何 TensorRT 符号，编译从此不依赖 TRT 头文件。
@@ -25,7 +25,7 @@ NVIDIA 官方示例：将 QAT（量化感知训练）后的 YOLOv5s 部署到 Or
 流水线：CPU（OpenCV 解码 + letterbox）→ GPU（MatX 将 FP32 重排为 DLA 输入格式）→ **DLA（cuDLA 推理）** → GPU（MatX 重排为 FP16 平面格式 + `decode_nms.cu` 中的解码/NMS）→ CPU（bbox 结果）。详见 [src/README.md](src/README.md)。
 
 - [src/validate_coco.cpp](src/validate_coco.cpp) —— `main()` 与命令行解析。尽管名字叫 validate_coco，它才是程序入口，同时处理单图推理和验证两种流程。图片列表经 `--list` 传入（默认 `./data/coco_val_2017_list.txt`）；`NUM_CLASSES != 80` 时预测自动采用字符串文件名 image id + 恒等类别编码（与 `make_coco_json.py` 的 GT 编码对齐）。
-- [src/yolov5.cpp](src/yolov5.cpp) / [yolov5.h](src/yolov5.h) —— 流水线调度核心。分配 CUDA 缓冲区、持有 cuDLA 上下文、驱动前后处理。`mInputScale`（yolov5.cpp:239 用于把 FP32 输入量化为 INT8）来自校准缓存的 `images:` 条目 —— 换新缓存时若值变化需同步更新。`mOutputScale1-3` 声明了但**从未使用**（死代码 —— DLA 输出是 FP16，直接消费）。网络输入固定为 1x3x672x672。类别数来自 `YOLO_NUM_CLASSES` 编译宏（`make NUM_CLASSES=<n>`，默认 80）。
+- [src/yolov5.cpp](src/yolov5.cpp) / [yolov5.h](src/yolov5.h) —— 流水线调度核心。分配 CUDA 缓冲区、持有 cuDLA 上下文、驱动前后处理。`mInputScale`（yolov5.cpp:239 用于把 FP32 输入量化为 INT8）来自校准缓存的 `images:` 条目 —— 换新缓存时若值变化需同步更新。`mOutputScale1-3` 声明了但**从未使用**（死代码 —— DLA 输出是 FP16，直接消费）。网络输入是构建参数 —— `make INPUT_H=<h> INPUT_W=<w>`（32 的倍数，默认 672×672），全部检测头几何由它推导。类别数来自 `YOLO_NUM_CLASSES` 编译宏（`make NUM_CLASSES=<n>`，默认 80）。
 - **两个互斥的 cuDLA 上下文实现**（在 `yolov5.cpp` 中编译期选择；对比与选型见下文「混合模式与独立模式的选择」）：
   - [src/cudla_context_hybrid.cpp](src/cudla_context_hybrid.cpp) —— 混合模式：CUDA 分配的缓冲区通过 `cudlaMemRegister` 注册到 cuDLA；任务在 CUDA stream 上提交。是集成最简单的路径。
   - [src/cudla_context_standalone.cpp](src/cudla_context_standalone.cpp) —— 独立模式：使用 NvSciBuf/NvSciSync 管理缓冲区和 fence，并作为外部内存/信号量导入 CUDA。使 DLA 路径不依赖 CUDA context 的创建；确定性信号量变体（`USE_DETERMINISTIC_SEMAPHORE`）是对较老 DriveOS/JetPack 上 NvSciSync 行为的变通方案。

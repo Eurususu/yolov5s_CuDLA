@@ -137,7 +137,13 @@ def export_onnx(model : Model, file, size=640, dynamic_batch=False, noanchor=Fal
     device = next(model.parameters()).device
     model.float()
 
-    dummy = torch.zeros(1, 3, size, size, device=device)
+    # size: int for a square input, or "HxW" (e.g. "736x1280") for rectangular
+    # (both H and W must be multiples of the stride 32 for the head grids)
+    if isinstance(size, str) and "x" in size.lower():
+        h, w = (int(x) for x in size.lower().split("x"))
+    else:
+        h = w = int(size)
+    dummy = torch.zeros(1, 3, h, w, device=device)
     model.model[-1].concat = True
     grid_old_func = model.model[-1]._make_grid
     model.model[-1]._make_grid = lambda *args: [torch.from_numpy(item.cpu().data.numpy()).to(item.device) for item in grid_old_func(*args)]
@@ -325,7 +331,7 @@ if __name__ == "__main__":
     exp    = subps.add_parser("export", help="Export weight to onnx file")
     exp.add_argument("weight", type=str, default="yolov5s.pt", help="export pt file")
     exp.add_argument("--save", type=str, required=False, help="export onnx file")
-    exp.add_argument("--size", type=int, default=640, help="export input size")
+    exp.add_argument("--size", type=str, default="640", help="export input size: int for square, or HxW e.g. 736x1280")
     exp.add_argument("--dynamic", action="store_true", help="export dynamic batch")
     exp.add_argument("--noanchor", action="store_true", help="export no anchor nodes")
     exp.add_argument("--noqadd", action="store_true", help="export do not add QuantAdd")

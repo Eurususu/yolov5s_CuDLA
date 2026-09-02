@@ -76,6 +76,11 @@ python scripts/qat.py export qat_1280.pt --size=736x1280 --save=yolov5_3clases_q
 | 下游消费者 | `qdq_translator.py` → PTQ ONNX + INT8 校准缓存 → trtexec `--int8 --calib` | trtexec 直接 `--fp16` 编译（无需校准缓存） |
 
 - `--noqadd` 只对 FP16 风味重要：默认 `cmd_export` 还会执行 `replace_bottleneck_forward()`，把 Bottleneck 残差加法改经 **QuantAdd**。在 QAT checkpoint 上这些量化器是训练图的一部分、scale 已校准（保留）；而在纯 `best.pt` 上它们会被临时注入、**scale 未校准** → 图里多出约 14 个携带垃圾 scale 的伪 Q/DQ 节点，直接毁掉 FP16 构建。导出未量化的 checkpoint 时务必加 `--noqadd`。
+- `quantize --imgsz` 不需要矩形版本：train loader 本来就 letterbox 成正方形（yolov5 训练式），
+  val loader 已经保纵横比（`rect=True`，长边 = imgsz）。scale 统计主要由目标尺度分布决定，
+  长边匹配（如 736x1280 部署用 `--imgsz 1280`）已覆盖 —— padding 差异对逐张量 scale 影响甚微。
+  只有当部署后的量化损失实测异常偏大时，才值得加固定 HxW 的 letterbox 校准。
+
 - 共用参数：`--size=672` = 部署分辨率；`--dynamic` = 动态 batch 轴；`--noanchor` 剥掉检测头的锚点解码（C++ 端用自己的锚点解码；输出原始 s8/s16/s32）。
 
 

@@ -78,6 +78,14 @@ python scripts/qat.py export qat_1280.pt --size=736x1280 --save=yolov5_3clases_q
 | Consumer | `qdq_translator.py` → PTQ ONNX + INT8 calib cache → trtexec `--int8 --calib` | trtexec `--fp16` directly (no calibration cache) |
 
 - `--noqadd` matters only for the FP32 flavor: by default `cmd_export` also runs `replace_bottleneck_forward()`, routing Bottleneck residual adds through **QuantAdd**. On a QAT checkpoint those quantizers are calibrated and part of the trained graph (keep them); on a plain `best.pt` they get injected fresh with **uncalibrated scales** → ~14 bogus Q/DQ nodes whose garbage scales corrupt the FP16 build. Always pass `--noqadd` when exporting a non-quantized checkpoint.
+- `quantize --imgsz` needs no rectangular variant: the train loader letterboxes to
+  square (yolov5 training style) and the val loader is already aspect-preserving
+  (`rect=True`, long side = imgsz). Scale statistics are dominated by the
+  object-scale distribution, which long-side matching (e.g. `--imgsz 1280` for a
+  736x1280 deployment) already captures — padding differences barely move per-tensor
+  scales. Only add fixed-HxW letterbox calibration if the deployed quantization
+  loss measures anomalously large.
+
 - Shared flags: `--size=672` = deployment resolution; `--dynamic` = dynamic batch axis; `--noanchor` strips the head's anchor decode (the C++ app decodes with its own anchors; outputs raw s8/s16/s32).
 
 

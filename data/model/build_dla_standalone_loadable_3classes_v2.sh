@@ -12,16 +12,16 @@ TRTEXEC=/usr/src/tensorrt/bin/trtexec
 # TensorRT 10.x refuses the TRT-8600 cache header; rewrite it to the local TRT version.
 TRT_VERSION=$(${TRTEXEC} --version 2>&1 | grep -oE 'TensorRT v[0-9]+' | head -1 | grep -oE '[0-9]+')
 CALIB_CACHE=data/loadable/qat2ptq_3classes.cache
-sed "1s/^TRT-[0-9]*/TRT-${TRT_VERSION}/" data/model/yolov5_3clases_qat_precision_config_calib.cache > ${CALIB_CACHE}
+sed "1s/^TRT-[0-9]*/TRT-${TRT_VERSION}/" data/model/yolov5_3classes_qat_precision_config_calib.cache > ${CALIB_CACHE}
 
 # FP16 loadable (same artifact as the v1 script)
-${TRTEXEC} --onnx=data/model/yolov5_3clases_fp32_trimmed.onnx --fp16 \
+${TRTEXEC} --onnx=data/model/yolov5_3classes_fp32_trimmed.onnx --fp16 \
     --saveEngine=data/loadable/yolov5_3classes.fp16.fp16chw16in.fp16chw16out.standalone.bin \
     --inputIOFormats=fp16:chw16 --outputIOFormats=fp16:chw16 --buildDLAStandalone --useDLACore=0
 
 # INT8 loadable, v2 precision set (3 head convs + model.23/cv3 branch in FP16)
 ${TRTEXEC} --minShapes=images:1x3x672x672 --maxShapes=images:1x3x672x672 --optShapes=images:1x3x672x672 --shapes=images:1x3x672x672 \
-    --onnx=data/model/yolov5_3clases_qat_noqdq.onnx --useDLACore=0 --buildDLAStandalone \
+    --onnx=data/model/yolov5_3classes_qat_noqdq.onnx --useDLACore=0 --buildDLAStandalone \
     --saveEngine=data/loadable/yolov5_3classes_v2.int8.int8hwc4in.fp16chw16out.standalone.bin \
     --inputIOFormats=int8:dla_hwc4 --outputIOFormats=fp16:chw16 --int8 --fp16 \
     --calib=${CALIB_CACHE} --precisionConstraints=obey \

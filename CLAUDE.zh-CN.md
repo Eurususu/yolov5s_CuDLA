@@ -134,7 +134,7 @@ python3 qdq_translator.py --input_onnx_models=../../data/model/yolov5_trimmed_qa
 
 ## 线路 B —— 自定义数据集：训练 → QAT → DLA 部署
 
-从自有数据集到 DLA 推理的端到端流程。仓库内实例：三分类模型（`data/model/yolov5_3clases_qat*`，2026-08-28 验证：8 个检测 @ 3.74ms/图）。
+从自有数据集到 DLA 推理的端到端流程。仓库内实例：三分类模型（`data/model/yolov5_3classes_qat*`，2026-08-28 验证：8 个检测 @ 3.74ms/图）。
 
 **①–⑤ 服务器 —— 数据准备、FP32 训练、QAT 微调、ONNX 导出。** 这些步骤在 `yolov5_dla` 工具包内完成；详细命令（环境搭建、单卡/多卡训练、可选的 COCO 格式 GT 生成、PTQ+QAT、导出）见 [yolov5_dla/CLAUDE.zh-CN.md](yolov5_dla/CLAUDE.zh-CN.md) —— 按那份文档执行，最后**只把导出的 `.onnx`** 拷回 Jetson 的 `data/model/`。两个部署侧关键点：训练用 `--imgsz 672`（对齐部署端固定输入）；盯 autoanchor 日志 —— 若训练替换了锚点，需同步进 src/yolov5.cpp 的 `anchors[]`（第 ⑧ 步）。
 

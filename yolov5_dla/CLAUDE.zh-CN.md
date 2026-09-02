@@ -61,7 +61,7 @@ python scripts/qat.py quantize runs/train/exp2/weights/best.pt --cocodir /root/d
 python scripts/qat.py export qat_1280.pt --size=672 --save=... --dynamic --noanchor
 
 # 矩形（新增，HxW 格式）
-python scripts/qat.py export qat_1280.pt --size=736x1280 --save=yolov5_3clases_qat_720p.onnx --dynamic --noanchor
+python scripts/qat.py export qat_1280.pt --size=736x1280 --save=yolov5_3classes_qat_720p.onnx --dynamic --noanchor
 ```
 
 #### 两种导出风味（INT8 路径 vs FP16 路径）

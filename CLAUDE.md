@@ -134,7 +134,7 @@ Reference: the completed 8.26 retrain cycle lives in the repo (`yolov5_trimmed_q
 
 ## Pipeline B — Custom Dataset: Train → QAT → DLA Deployment
 
-End-to-end from your own dataset. Worked example in the repo: the 3-class model (`data/model/yolov5_3clases_qat*`, verified 2026-08-28: 8 detections @ 3.74 ms/img).
+End-to-end from your own dataset. Worked example in the repo: the 3-class model (`data/model/yolov5_3classes_qat*`, verified 2026-08-28: 8 detections @ 3.74 ms/img).
 
 **①–⑤ Server — data prep, FP32 training, QAT fine-tune, ONNX export.** Run these inside the `yolov5_dla` toolkit; the detailed commands (environment setup, single/multi-GPU training, optional COCO-json GT generation, PTQ+QAT, export) are documented in [yolov5_dla/CLAUDE.md](yolov5_dla/CLAUDE.md) — follow that doc, then bring back **only the exported `.onnx`** to the Jetson's `data/model/`. Two deployment-critical points from the server side: train at `--imgsz 672` (matches the fixed deployment input), and watch the autoanchor log — if training replaces the anchors they must be synced into `anchors[]` in src/yolov5.cpp (step ⑧).
 

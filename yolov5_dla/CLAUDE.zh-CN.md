@@ -57,7 +57,11 @@ python scripts/qat.py quantize runs/train/exp2/weights/best.pt --cocodir /root/d
 #    加 --save-json 可附带 pycocotools AP/AR 日志（需先做第 2 步）
 
 # 4. 导出供 trtexec INT8 的 Q/DQ ONNX —— 原始 s8/s16/s32 检测头输出，动态 batch
-python scripts/qat.py export qat.pt --size=672 --save=yolov5_trimmed_qat.onnx --dynamic --noanchor
+# 正方形（向后兼容，纯数字）
+python scripts/qat.py export qat_1280.pt --size=672 --save=... --dynamic --noanchor
+
+# 矩形（新增，HxW 格式）
+python scripts/qat.py export qat_1280.pt --size=736x1280 --save=yolov5_3clases_qat_720p.onnx --dynamic --noanchor
 ```
 
 #### 两种导出风味（INT8 路径 vs FP16 路径）

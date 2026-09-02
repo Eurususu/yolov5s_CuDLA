@@ -46,8 +46,13 @@ NVCC_FLAGS := -gencode arch=compute_87,code=sm_87
 # Number of classes of the deployed model — must match the loadable passed via
 # --engine / ENGINE=. Switching requires a matx rebuild AND make clean:
 #   NUM_CLASSES=3 bash src/matx_reformat/build_matx_reformat.sh && make clean && make
+# Network input resolution (multiples of 32) — must match the loadable's export
+# size, e.g. 720p: INPUT_H=736 INPUT_W=1280. Switching requires a matx rebuild
+# + make clean (same as NUM_CLASSES).
+INPUT_H ?= 672
+INPUT_W ?= 672
 NUM_CLASSES ?= 80
-ALL_CCFLAGS += -DYOLO_NUM_CLASSES=$(NUM_CLASSES)
+ALL_CCFLAGS += -DYOLO_NUM_CLASSES=$(NUM_CLASSES) -DYOLO_INPUT_H=$(INPUT_H) -DYOLO_INPUT_W=$(INPUT_W)
 
 OPENCV_INCLUDE_PATH ?= /usr/include/opencv4/
 OPENCV_LIB_PATH ?= /usr/lib/aarch64-linux-gnu/

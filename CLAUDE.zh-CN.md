@@ -153,11 +153,11 @@ python3 qdq_translator.py --input_onnx_models=../../data/model/mydata_qat.onnx \
 **⑧ Jetson —— 用正确的类别数构建**（nc 是构建参数，无需改源码）：
 
 ```bash
-NUM_CLASSES=<nc> bash src/matx_reformat/build_matx_reformat.sh   # 重编 matx 库
-make clean && make NUM_CLASSES=<nc>
+NUM_CLASSES=<nc> [INPUT_H=<h> INPUT_W=<w>] bash src/matx_reformat/build_matx_reformat.sh   # 重编 matx 库
+make clean && make NUM_CLASSES=<nc> [INPUT_H=<h> INPUT_W=<w>]
 ```
 
-`NUM_CLASSES` 默认 80（仓库自带的 COCO 模型）。它驱动缓冲区尺寸、decode 调用点和 CHW16/CHW32 重排的分组维度（`YOLO_NUM_CLASSES` 宏，见 [src/yolov5.cpp](src/yolov5.cpp) 与 [matx_reformat.cu](src/matx_reformat/matx_reformat.cu)；`decode_nms.cu` 是参数化的）。**该参数必须与 `--engine`/`ENGINE=` 传入的 loadable 匹配** —— 不匹配会静默产生乱码级结果。另外：仅当 ② 替换过锚点才需改 yolov5.cpp 的 `anchors[]`；仅当 ⑥ 发现值不同才需改 `mInputScale`。
+`NUM_CLASSES` 默认 80（仓库自带的 COCO 模型）。它驱动缓冲区尺寸、decode 调用点和 CHW16/CHW32 重排的分组维度（`YOLO_NUM_CLASSES` 宏，见 [src/yolov5.cpp](src/yolov5.cpp) 与 [matx_reformat.cu](src/matx_reformat/matx_reformat.cu)；`decode_nms.cu` 是参数化的）。`INPUT_H`/`INPUT_W`（均须为 32 的倍数）默认 672×672，经 `YOLO_INPUT_H/W` 宏驱动全部派生几何（检测头网格、锚点总数、letterbox 画布），必须与 loadable 的导出尺寸完全一致 —— 720p：导出用 `--size=736x1280`、构建用 `INPUT_H=736 INPUT_W=1280`，构建脚本为 [build_dla_standalone_loadable_3classes_720p.sh](data/model/build_dla_standalone_loadable_3classes_720p.sh)（已端到端验证：INT8 5.5ms @ 12 目标、FP16 13 目标）。**该参数必须与 `--engine`/`ENGINE=` 传入的 loadable 匹配** —— 不匹配会静默产生乱码级结果。另外：仅当 ② 替换过锚点才需改 yolov5.cpp 的 `anchors[]`；仅当 ⑥ 发现值不同才需改 `mInputScale`。
 
 **⑨ Jetson —— 运行与验证：**
 
@@ -243,5 +243,6 @@ python3 test_coco_map.py --predict predict.json --coco /path/to/ds
 
 - **mAP ≈ 0.01 且目标检不出**（如 bus 检测不到）—— 程序的 `NUM_CLASSES` 构建值与 loadable 不匹配（80 类模型跑在 3 类构建上踩过）。用匹配的 `NUM_CLASSES` 重编两个库（见线路 B ⑧）。
 - `mOutputScale1-3` 看起来需要随重训练更新 —— 它们是死代码；只有 `mInputScale`（缓存 `images:` 条目）被使用。
+- 分辨率参数化时 letterbox 行为随之改变：原示例把内容映射进 672 画布中央的 640x640 区域（+16 边框，为匹配 640 训练的模型）；现在改为**全画布** letterbox（匹配按部署尺寸训练的模型及 `rect=True` 验证）。同一模型的检测结果数量可能与旧运行略有差异。
 - 程序会把 `--coco_path` 拼接到列表每一行前面 —— 列表条目保持相对路径（现在也支持绝对路径）；非 COCO 列表用 `--list` 传入。
 - 自定义数据集评测编码：`coco80_to_coco91_class` 映射仅在 `NUM_CLASSES == 80` 时应用；自定义模型用恒等类别 id + 字符串 image id，与 `make_coco_json.py` 对齐。

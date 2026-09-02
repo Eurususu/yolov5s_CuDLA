@@ -49,5 +49,5 @@ else
     CMAKE=./cmake-3.25.3-linux-aarch64/bin/cmake
 fi
 
-${CMAKE} -DYOLO_NUM_CLASSES=${NUM_CLASSES:-80} ..
+${CMAKE} -DYOLO_NUM_CLASSES=${NUM_CLASSES:-80} -DYOLO_INPUT_W=${INPUT_W:-672} -DYOLO_INPUT_H=${INPUT_H:-672} ..
 make clean && make

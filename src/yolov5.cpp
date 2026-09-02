@@ -35,6 +35,17 @@
 #endif
 constexpr int kNumClasses = YOLO_NUM_CLASSES;
 
+// Head grid geometry derived from the build-time input resolution (see
+// yolov5.h: NetworkImageWidth/Height): 3 heads at strides 8/16/32.
+// kGridTotal = grid positions per anchor (9261 @ 672x672); 3*kGridTotal = boxes.
+constexpr int kHeadW8     = NetworkImageWidth / 8, kHeadH8 = NetworkImageHeight / 8;
+constexpr int kHeadW16    = NetworkImageWidth / 16, kHeadH16 = NetworkImageHeight / 16;
+constexpr int kHeadW32    = NetworkImageWidth / 32, kHeadH32 = NetworkImageHeight / 32;
+constexpr int kArea8      = kHeadW8 * kHeadH8;    // 7056 @ 672x672
+constexpr int kArea16     = kHeadW16 * kHeadH16;  // 1764
+constexpr int kArea32     = kHeadW32 * kHeadH32;  // 441
+constexpr int kGridTotal  = kArea8 + kArea16 + kArea32;  // 9261
+
 template <typename T, int N> void printBuffer(const void *buffer)
 {
     size_t bytes    = N * sizeof(T);
@@ -71,7 +82,7 @@ yolov5::yolov5(std::string engine_path, Yolov5Backend backend)
 #else
         mCuDLACtx = new cuDLAContextHybrid(engine_path.c_str());
 #endif
-        checkCudaErrors(cudaMalloc(&mInputTemp1, 1 * 3 * 672 * 672 * sizeof(float)));
+        checkCudaErrors(cudaMalloc(&mInputTemp1, (size_t)3 * NetworkImageWidth * NetworkImageHeight * sizeof(float)));
         if (mBackend == Yolov5Backend::CUDLA_FP16)
         {
             // Same size as cuDLA input
@@ -105,9 +116,9 @@ yolov5::yolov5(std::string engine_path, Yolov5Backend backend)
     mBindingArray.push_back(output_buf_2);
 
     src = {mBindingArray[1], mBindingArray[2], mBindingArray[3]};
-    cudaMalloc((void **)&dst[0], sizeof(half) * 3 * (kNumClasses + 5) * 9261);
-    dst[1] = reinterpret_cast<half *>(dst[0]) + 3 * (kNumClasses + 5) * 7056;
-    dst[2] = reinterpret_cast<half *>(dst[1]) + 3 * (kNumClasses + 5) * 1764;
+    cudaMalloc((void **)&dst[0], sizeof(half) * 3 * (kNumClasses + 5) * kGridTotal);
+    dst[1] = reinterpret_cast<half *>(dst[0]) + 3 * (kNumClasses + 5) * kArea8;
+    dst[2] = reinterpret_cast<half *>(dst[1]) + 3 * (kNumClasses + 5) * kArea16;
 
     mReformatRunner = new ReformatRunner();
 
@@ -136,7 +147,7 @@ yolov5::yolov5(std::string engine_path, Yolov5Backend backend)
         }
     }
 
-    uint64_t size = 3 * 9261 * 5 * sizeof(float);
+    uint64_t size = (size_t)3 * kGridTotal * 5 * sizeof(float);
 
     float *prior_ptr = (float *)malloc(size);
     checkCudaErrors(cudaMalloc(&prior_ptr_dev, size));
@@ -200,11 +211,16 @@ std::vector<cv::Mat> yolov5::preProcess4Validate(std::vector<cv::Mat> &cv_img)
         std::vector<float> from_{(float)cv_img[i].cols, (float)cv_img[i].rows};
         mW = cv_img[i].cols;
         mH = cv_img[i].rows;
-        std::vector<float> to_{640, 640};
+        // Letterbox into the FULL network canvas (aspect-preserving, centered).
+        // (The original sample mapped content into a 640x640 region centered in
+        // the 672x672 canvas with a +16 border — a trick to keep 640-trained
+        // statistics; models trained at the deployment resolution are better
+        // served by the full canvas, which also matches rect=True validation.)
+        std::vector<float> to_{(float)NetworkImageWidth, (float)NetworkImageHeight};
         float              scale = to_[0] / from_[0] < to_[1] / from_[1] ? to_[0] / from_[0] : to_[1] / from_[1];
         std::vector<float> M_{
-            scale, 0,     (float)(-scale * from_[0] * 0.5 + to_[0] * 0.5 + scale * 0.5 - 0.5 + 16.0f),
-            0,     scale, (float)(-scale * from_[1] * 0.5 + to_[1] * 0.5 + scale * 0.5 - 0.5 + 16.0f)};
+            scale, 0,     (float)(-scale * from_[0] * 0.5 + to_[0] * 0.5 + scale * 0.5 - 0.5),
+            0,     scale, (float)(-scale * from_[1] * 0.5 + to_[1] * 0.5 + scale * 0.5 - 0.5)};
 
         cv::Mat M(2, 3, CV_32FC1, M_.data());
         float   d2i[6];
@@ -233,20 +249,20 @@ int yolov5::pushImg(void *imgBuffer, int numImg, bool fromCPU)
 {
     if (mBackend == Yolov5Backend::CUDLA_FP16)
     {
-        checkCudaErrors(cudaMemcpy(mInputTemp1, imgBuffer, 1 * 3 * 672 * 672 * sizeof(float), cudaMemcpyHostToDevice));
-        convert_float_to_half((float *)mInputTemp1, (__half *)mInputTemp2, 1 * 3 * 672 * 672);
+        checkCudaErrors(cudaMemcpy(mInputTemp1, imgBuffer, (size_t)3 * NetworkImageWidth * NetworkImageHeight * sizeof(float), cudaMemcpyHostToDevice));
+        convert_float_to_half((float *)mInputTemp1, (__half *)mInputTemp2, (size_t)3 * NetworkImageWidth * NetworkImageHeight);
         std::vector<void *> vec_temp_2{mInputTemp2};
         mReformatRunner->ReformatImage(vec_temp_2.data(), mBindingArray.data(), mStream);
     }
     if (mBackend == Yolov5Backend::CUDLA_INT8)
     {
-        checkCudaErrors(cudaMemcpy(mInputTemp1, imgBuffer, 1 * 3 * 672 * 672 * sizeof(float), cudaMemcpyHostToDevice));
+        checkCudaErrors(cudaMemcpy(mInputTemp1, imgBuffer, (size_t)3 * NetworkImageWidth * NetworkImageHeight * sizeof(float), cudaMemcpyHostToDevice));
         std::vector<void *> vec_temp_1{mInputTemp1};
         std::vector<void *> vec_temp_2{mInputTemp2};
         mReformatRunner->ReformatImageV2(vec_temp_1.data(), vec_temp_2.data(), mStream);
         checkCudaErrors(cudaStreamSynchronize(mStream));
         // dla_hwc4 format, so 1*4*672*672
-        convert_float_to_int8((float *)mInputTemp2, (int8_t *)mBindingArray[0], 1 * 4 * 672 * 672, mInputScale);
+        convert_float_to_int8((float *)mInputTemp2, (int8_t *)mBindingArray[0], (size_t)4 * NetworkImageWidth * NetworkImageHeight, mInputScale);
     }
     mImgPushed += numImg;
     return 0;
@@ -295,8 +311,8 @@ std::vector<std::vector<float>> yolov5::postProcess(float confidence_threshold, 
     checkCudaErrors(cudaMemsetAsync(parray, 0, parray_size, mStream));
     memset(parray_host, 0, parray_size);
     decode_nms_kernel_invoker((half *)dst[0],
-                              27783, // 9261 * 3,
-                              9261, kNumClasses, confidence_threshold, nms_threshold, mAffineMatrix, parray, prior_ptr_dev,
+                              3 * kGridTotal, // boxes = anchors x positions
+                              kGridTotal, kNumClasses, confidence_threshold, nms_threshold, mAffineMatrix, parray, prior_ptr_dev,
                               MAX_IMAGE_BBOX, mStream);
     checkCudaErrors(cudaMemcpyAsync(parray_host, parray, parray_size, cudaMemcpyDeviceToHost, mStream));
     checkCudaErrors(cudaStreamSynchronize(mStream));
@@ -383,8 +399,8 @@ std::vector<std::vector<float>> yolov5::postProcess4Validation(float confidence_
     checkCudaErrors(cudaMemsetAsync(parray, 0, parray_size, mStream));
     memset(parray_host, 0, parray_size);
     decode_nms_validate_kernel_invoker((half *)dst[0],
-                                       27783, // 9261 * 3,
-                                       9261, kNumClasses, confidence_threshold, nms_threshold, mAffineMatrix, parray,
+                                       3 * kGridTotal, // boxes = anchors x positions
+                                       kGridTotal, kNumClasses, confidence_threshold, nms_threshold, mAffineMatrix, parray,
                                        prior_ptr_dev, MAX_IMAGE_BBOX, mStream);
     checkCudaErrors(cudaMemcpyAsync(parray_host, parray, parray_size, cudaMemcpyDeviceToHost, mStream));
     checkCudaErrors(cudaStreamSynchronize(mStream));

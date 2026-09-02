@@ -153,11 +153,11 @@ Then compare the new cache's `images:` hex entry with `mInputScale` in src/yolov
 **⑧ Jetson — build with the right class count** (nc is a build flag — no source edits):
 
 ```bash
-NUM_CLASSES=<nc> bash src/matx_reformat/build_matx_reformat.sh   # rebuild the matx lib
-make clean && make NUM_CLASSES=<nc>
+NUM_CLASSES=<nc> [INPUT_H=<h> INPUT_W=<w>] bash src/matx_reformat/build_matx_reformat.sh   # matx lib
+make clean && make NUM_CLASSES=<nc> [INPUT_H=<h> INPUT_W=<w>]
 ```
 
-`NUM_CLASSES` defaults to 80 (the shipped COCO model). It drives buffer sizes, the decode call sites and the CHW16/CHW32 reformat group dims (`YOLO_NUM_CLASSES` macro in [src/yolov5.cpp](src/yolov5.cpp) and [matx_reformat.cu](src/matx_reformat/matx_reformat.cu); `decode_nms.cu` is parameterized). **The flag must match the loadable passed to `--engine`/`ENGINE=`** — a mismatch silently garbage-results. Also: `anchors[]` in yolov5.cpp — only if training (①–⑤) replaced them; `mInputScale` — only if ⑥ found a different value.
+`NUM_CLASSES` defaults to 80 (the shipped COCO model). It drives buffer sizes, the decode call sites and the CHW16/CHW32 reformat group dims (`YOLO_NUM_CLASSES` macro in [src/yolov5.cpp](src/yolov5.cpp) and [matx_reformat.cu](src/matx_reformat/matx_reformat.cu); `decode_nms.cu` is parameterized). `INPUT_H`/`INPUT_W` (both multiples of 32) default to 672x672 and drive every derived geometry (head grids, anchor count, letterbox canvas) via `YOLO_INPUT_H/W`; they must match the loadable's export size exactly — 720p: export `--size=736x1280`, build `INPUT_H=736 INPUT_W=1280`, using [build_dla_standalone_loadable_3classes_720p.sh](data/model/build_dla_standalone_loadable_3classes_720p.sh) (verified end-to-end: INT8 5.5 ms @ 12 dets, FP16 13 dets). **The flag must match the loadable passed to `--engine`/`ENGINE=`** — a mismatch silently garbage-results. Also: `anchors[]` in yolov5.cpp — only if training (①–⑤) replaced them; `mInputScale` — only if ⑥ found a different value.
 
 **⑨ Jetson — run and verify:**
 
@@ -243,5 +243,6 @@ Problems actually hit on these machines, with symptom → cause → fix.
 
 - **mAP ≈ 0.01 and objects missing** (e.g. bus not detected) — the app was built with a `NUM_CLASSES` that doesn't match the loadable (hit when an 80-class loadable ran against a 3-class build). Rebuild both libs with the matching `NUM_CLASSES` (see Pipeline B ⑧).
 - `mOutputScale1-3` look like they need updating on retrain — they are dead code; only `mInputScale` (cache `images:` entry) is used.
+- The letterbox changed with the resolution parameterization: the original sample mapped content into a 640x640 region centered in the 672x672 canvas (+16 border, matching 640-trained models); it now letterboxes into the FULL canvas (matches models trained at the deployment size and `rect=True` validation). Expect slightly different detection counts vs older runs of the same model.
 - The app prepends `--coco_path` to every list entry — keep list entries relative (or absolute, now also supported); pass `--list` for non-COCO lists.
 - Custom-dataset eval mismatch: the app's `coco80_to_coco91_class` map only applies when `NUM_CLASSES == 80`; custom models use identity ids + string image ids to match `make_coco_json.py`.

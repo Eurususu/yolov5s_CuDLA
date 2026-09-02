@@ -66,8 +66,17 @@
 
 const int      MAX_IMAGE_BBOX  = 10000;
 const int      NUM_BOX_ELEMENT = 7;
-const uint32_t NetworkImageWidth{672};
-const uint32_t NetworkImageHeight{672};
+// Network input resolution — build-time configurable via
+// `make INPUT_W=<w> INPUT_H=<h>` (both must be multiples of 32). Defaults
+// reproduce the original 672x672 sample; e.g. 720p uses INPUT_H=736 INPUT_W=1280.
+#ifndef YOLO_INPUT_W
+#define YOLO_INPUT_W 672
+#endif
+#ifndef YOLO_INPUT_H
+#define YOLO_INPUT_H 672
+#endif
+const uint32_t NetworkImageWidth{YOLO_INPUT_W};
+const uint32_t NetworkImageHeight{YOLO_INPUT_H};
 
 struct Box
 {

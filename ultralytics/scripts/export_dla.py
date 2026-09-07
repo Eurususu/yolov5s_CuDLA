@@ -17,13 +17,16 @@
 import argparse
 import os
 import sys
+from copy import deepcopy
 from pathlib import Path
+from types import MethodType
 
 sys.path.insert(0, os.path.abspath("."))  # run from the ultralytics repo root
 
 import torch
 
 from ultralytics import YOLO
+from ultralytics.nn.modules.block import C2f
 from ultralytics.nn.modules.head import Detect
 
 
@@ -35,6 +38,47 @@ def raw_forward(self, x):
         cls = self.cv3[i](x[i])   # [b, nc, h, w]
         outs.append(torch.cat((box, cls), 1))
     return outs
+
+
+# --- DLA-friendly C2f: eliminate the chunk->Slice op --------------------------------
+# Standalone DLA supports no Slice, and C2f's `self.cv1(x).chunk(2, 1)` exports
+# as one. Splitting is mathematically unnecessary: replace the single
+# Conv(c1 -> 2c) with two Conv(c1 -> c) whose weights are the two halves of
+# the original (identical numerics, two independent Conv nodes in the graph).
+# C3k2 (yolo11/yolo26) inherits C2f.forward, so this covers the whole family.
+
+def c2f_forward_nosplit(self, x):
+    y1, y2 = self.cv1a(x), self.cv1b(x)
+    y = [y1, y2]
+    y.extend(m(y[-1]) for m in self.m)  # keep the lazy-chained semantics of C2f.forward
+    return self.cv2(torch.cat(y, 1))
+
+
+def split_c2f_chunk(module: C2f) -> None:
+    cv1 = module.cv1
+    c = cv1.conv.out_channels // 2
+    for name, sl in (("cv1a", slice(0, c)), ("cv1b", slice(c, None))):
+        half = deepcopy(cv1)
+        half.conv.weight = torch.nn.Parameter(cv1.conv.weight.data[sl].clone())
+        if half.conv.bias is not None:  # fused: BN folded into a per-channel bias
+            half.conv.bias = torch.nn.Parameter(cv1.conv.bias.data[sl].clone())
+        bn = getattr(half, "bn", None)  # absent after fuse (BN folded into conv)
+        if bn is not None:
+            for p in ("weight", "bias", "running_mean", "running_var"):
+                setattr(bn, p, getattr(bn, p)[sl].clone())
+        setattr(module, name, half)
+    del module.cv1  # keep the state dict clean of the now-unused 2c conv
+    module.forward = MethodType(c2f_forward_nosplit, module)
+
+
+def make_dla_friendly(model) -> int:
+    """Split every C2f-family module's paired conv; returns the patch count."""
+    n = 0
+    for m in model.modules():
+        if isinstance(m, C2f):
+            split_c2f_chunk(m)
+            n += 1
+    return n
 
 
 def main():
@@ -63,6 +107,25 @@ def main():
     nc, reg_max, nl, strides = head.nc, head.reg_max, head.nl, head.stride.tolist()
     print(f"head: nc={nc} reg_max={reg_max} nl={nl} strides={strides} "
           f"channels/level={4*reg_max + nc}")
+
+    Detect.forward = raw_forward  # emit raw per-level outputs during export
+
+    dummy = torch.zeros(1, 3, h, w, device=args.device)
+    with torch.no_grad():
+        ref = net(dummy)  # reference raw outputs (pre-split)
+
+    n = make_dla_friendly(net)
+    print(f"DLA-friendly split applied to {n} C2f-family modules "
+          f"(chunk->two Convs, numerics unchanged)")
+
+    with torch.no_grad():
+        new = net(dummy)
+    # threshold is RELATIVE: one 2c-channel conv vs two c-channel convs differ
+    # by FP accumulation-order noise (~1e-4 rel), a real semantic bug is O(1) rel
+    diffs = [((a - b).abs().max().item(), a.abs().max().item()) for a, b in zip(ref, new)]
+    worst = max(d / max(1.0, s) for d, s in diffs)
+    print(f"numerical equivalence check: worst relative diff = {worst:.2e}")
+    assert worst < 1e-2, "patched model diverged from reference!"
 
     Detect.forward = raw_forward  # emit raw per-level outputs during export
 

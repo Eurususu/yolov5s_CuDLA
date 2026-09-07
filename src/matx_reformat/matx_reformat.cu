@@ -113,10 +113,26 @@ void* allocDeviceMemory(size_t size)
 #define YOLO_NUM_CLASSES 80
 #endif
 constexpr int kNumClasses  = YOLO_NUM_CLASSES;
-constexpr int kChPerAnchor = kNumClasses + 5;               // 8: x, y, w, h, obj + classes
-constexpr int kHeadCh      = 3 * kChPerAnchor;              // 24
+
+// Head style (keep in sync with the app build): v5 = anchor-based
+// (3 anchors x (nc+5) channels); v8 = anchor-free DFL (4*reg_max + nc per
+// position, single box per grid cell). Selected via build HEAD_STYLE=v8.
+#ifdef YOLO_HEAD_STYLE_V8
+#ifndef YOLO_REG_MAX
+#define YOLO_REG_MAX 16
+#endif
+constexpr int kRegMax        = YOLO_REG_MAX;
+constexpr int kAnchorsPerPos = 1;
+constexpr int kChPerPos      = 4 * kRegMax + kNumClasses;
+#else
+constexpr int kAnchorsPerPos = 3;
+constexpr int kChPerPos      = kNumClasses + 5;
+#endif
+constexpr int kChPerAnchor = kChPerPos;                      // channels per anchor/position
+constexpr int kHeadCh      = kAnchorsPerPos * kChPerAnchor;
 constexpr int kChw16Groups = (kHeadCh + 15) / 16;           // 2  (24 -> padded 32)
 constexpr int kChw32Groups = (kHeadCh + 31) / 32;           // 1  (24 -> padded 32)
+
 
 // Network input resolution — must match the app build (`make INPUT_W=<> INPUT_H=<>`,
 // both multiples of 32); defaults reproduce the original 672x672 sample.
@@ -152,22 +168,22 @@ public:
     {
         matx::tensor_t<matx::matxFp16, 5> mHead1Input1 = matx::make_tensor<matx::matxFp16>((matx::matxFp16*)src[0], {1, kChw16Groups, kH8, kW8, 16});
         matx::tensor_t<matx::matxFp16, 5> mHead1Output1 = matx::make_tensor<matx::matxFp16>((matx::matxFp16*)mTemp, {1, kChw16Groups, 16, kH8, kW8});
-        matx::tensor_t<matx::matxFp16, 4> mHead1Input2 = matx::make_tensor<matx::matxFp16>((matx::matxFp16*)mTemp, {1, 3, kChPerAnchor, kArea8});
-        matx::tensor_t<matx::matxFp16, 4> mHead1Output2 = matx::make_tensor<matx::matxFp16>((matx::matxFp16*)dst[0], {1, kArea8, 3, kChPerAnchor});
+        matx::tensor_t<matx::matxFp16, 4> mHead1Input2 = matx::make_tensor<matx::matxFp16>((matx::matxFp16*)mTemp, {1, kAnchorsPerPos, kChPerAnchor, kArea8});
+        matx::tensor_t<matx::matxFp16, 4> mHead1Output2 = matx::make_tensor<matx::matxFp16>((matx::matxFp16*)dst[0], {1, kArea8, kAnchorsPerPos, kChPerAnchor});
         matx::copy(mHead1Output1, mHead1Input1.Permute({0, 1, 4, 2, 3}), stream);
         matx::copy(mHead1Output2, mHead1Input2.Permute({0, 3, 1, 2}), stream);
 
         matx::tensor_t<matx::matxFp16, 5> mHead2Input1 = matx::make_tensor<matx::matxFp16>((matx::matxFp16*)src[1], {1, kChw16Groups, kH16, kW16, 16});
         matx::tensor_t<matx::matxFp16, 5> mHead2Output1 = matx::make_tensor<matx::matxFp16>((matx::matxFp16*)mTemp, {1, kChw16Groups, 16, kH16, kW16});
-        matx::tensor_t<matx::matxFp16, 4> mHead2Input2 = matx::make_tensor<matx::matxFp16>((matx::matxFp16*)mTemp, {1, 3, kChPerAnchor, kArea16});
-        matx::tensor_t<matx::matxFp16, 4> mHead2Output2 = matx::make_tensor<matx::matxFp16>((matx::matxFp16*)dst[1], {1, kArea16, 3, kChPerAnchor});
+        matx::tensor_t<matx::matxFp16, 4> mHead2Input2 = matx::make_tensor<matx::matxFp16>((matx::matxFp16*)mTemp, {1, kAnchorsPerPos, kChPerAnchor, kArea16});
+        matx::tensor_t<matx::matxFp16, 4> mHead2Output2 = matx::make_tensor<matx::matxFp16>((matx::matxFp16*)dst[1], {1, kArea16, kAnchorsPerPos, kChPerAnchor});
         matx::copy(mHead2Output1, mHead2Input1.Permute({0, 1, 4, 2, 3}), stream);
         matx::copy(mHead2Output2, mHead2Input2.Permute({0, 3, 1, 2}), stream);
 
         matx::tensor_t<matx::matxFp16, 5> mHead3Input1 = matx::make_tensor<matx::matxFp16>((matx::matxFp16*)src[2], {1, kChw16Groups, kH32, kW32, 16});
         matx::tensor_t<matx::matxFp16, 5> mHead3Output1 = matx::make_tensor<matx::matxFp16>((matx::matxFp16*)mTemp, {1, kChw16Groups, 16, kH32, kW32});
-        matx::tensor_t<matx::matxFp16, 4> mHead3Input2 = matx::make_tensor<matx::matxFp16>((matx::matxFp16*)mTemp, {1, 3, kChPerAnchor, kArea32});
-        matx::tensor_t<matx::matxFp16, 4> mHead3Output2 = matx::make_tensor<matx::matxFp16>((matx::matxFp16*)dst[2], {1, kArea32, 3, kChPerAnchor});
+        matx::tensor_t<matx::matxFp16, 4> mHead3Input2 = matx::make_tensor<matx::matxFp16>((matx::matxFp16*)mTemp, {1, kAnchorsPerPos, kChPerAnchor, kArea32});
+        matx::tensor_t<matx::matxFp16, 4> mHead3Output2 = matx::make_tensor<matx::matxFp16>((matx::matxFp16*)dst[2], {1, kArea32, kAnchorsPerPos, kChPerAnchor});
         matx::copy(mHead3Output1, mHead3Input1.Permute({0, 1, 4, 2, 3}), stream);
         matx::copy(mHead3Output2, mHead3Input2.Permute({0, 3, 1, 2}), stream);
         return true;
@@ -200,16 +216,16 @@ public:
 
     bool Transpose(void** src, void** dst, cudaStream_t stream)
     {
-        matx::tensor_t<matx::matxFp16, 4> mHead1Input2 = matx::make_tensor<matx::matxFp16>((matx::matxFp16*)src[0], {1, 3, kChPerAnchor, kArea8});
-        matx::tensor_t<matx::matxFp16, 4> mHead1Output2 = matx::make_tensor<matx::matxFp16>((matx::matxFp16*)dst[0], {1, kArea8, 3, kChPerAnchor});
+        matx::tensor_t<matx::matxFp16, 4> mHead1Input2 = matx::make_tensor<matx::matxFp16>((matx::matxFp16*)src[0], {1, kAnchorsPerPos, kChPerAnchor, kArea8});
+        matx::tensor_t<matx::matxFp16, 4> mHead1Output2 = matx::make_tensor<matx::matxFp16>((matx::matxFp16*)dst[0], {1, kArea8, kAnchorsPerPos, kChPerAnchor});
         matx::copy(mHead1Output2, mHead1Input2.Permute({0, 3, 1, 2}), stream);
 
-        matx::tensor_t<matx::matxFp16, 4> mHead2Input2 = matx::make_tensor<matx::matxFp16>((matx::matxFp16*)src[1], {1, 3, kChPerAnchor, kArea16});
-        matx::tensor_t<matx::matxFp16, 4> mHead2Output2 = matx::make_tensor<matx::matxFp16>((matx::matxFp16*)dst[1], {1, kArea16, 3, kChPerAnchor});
+        matx::tensor_t<matx::matxFp16, 4> mHead2Input2 = matx::make_tensor<matx::matxFp16>((matx::matxFp16*)src[1], {1, kAnchorsPerPos, kChPerAnchor, kArea16});
+        matx::tensor_t<matx::matxFp16, 4> mHead2Output2 = matx::make_tensor<matx::matxFp16>((matx::matxFp16*)dst[1], {1, kArea16, kAnchorsPerPos, kChPerAnchor});
         matx::copy(mHead2Output2, mHead2Input2.Permute({0, 3, 1, 2}), stream);
 
-        matx::tensor_t<matx::matxFp16, 4> mHead3Input2 = matx::make_tensor<matx::matxFp16>((matx::matxFp16*)src[2], {1, 3, kChPerAnchor, kArea32});
-        matx::tensor_t<matx::matxFp16, 4> mHead3Output2 = matx::make_tensor<matx::matxFp16>((matx::matxFp16*)dst[2], {1, kArea32, 3, kChPerAnchor});
+        matx::tensor_t<matx::matxFp16, 4> mHead3Input2 = matx::make_tensor<matx::matxFp16>((matx::matxFp16*)src[2], {1, kAnchorsPerPos, kChPerAnchor, kArea32});
+        matx::tensor_t<matx::matxFp16, 4> mHead3Output2 = matx::make_tensor<matx::matxFp16>((matx::matxFp16*)dst[2], {1, kArea32, kAnchorsPerPos, kChPerAnchor});
         matx::copy(mHead3Output2, mHead3Input2.Permute({0, 3, 1, 2}), stream);
         return true;
     }
@@ -218,22 +234,22 @@ public:
     {
         matx::tensor_t<matx::matxFp16, 5> mHead1Input1 = matx::make_tensor<matx::matxFp16>((matx::matxFp16*)src[0], {1, kChw32Groups, kH8, kW8, 32});
         matx::tensor_t<matx::matxFp16, 5> mHead1Output1 = matx::make_tensor<matx::matxFp16>((matx::matxFp16*)mTemp, {1, kChw32Groups, 32, kH8, kW8});
-        matx::tensor_t<matx::matxFp16, 4> mHead1Input2 = matx::make_tensor<matx::matxFp16>((matx::matxFp16*)mTemp, {1, 3, kChPerAnchor, kArea8});
-        matx::tensor_t<matx::matxFp16, 4> mHead1Output2 = matx::make_tensor<matx::matxFp16>((matx::matxFp16*)dst[0], {1, kArea8, 3, kChPerAnchor});
+        matx::tensor_t<matx::matxFp16, 4> mHead1Input2 = matx::make_tensor<matx::matxFp16>((matx::matxFp16*)mTemp, {1, kAnchorsPerPos, kChPerAnchor, kArea8});
+        matx::tensor_t<matx::matxFp16, 4> mHead1Output2 = matx::make_tensor<matx::matxFp16>((matx::matxFp16*)dst[0], {1, kArea8, kAnchorsPerPos, kChPerAnchor});
         matx::copy(mHead1Output1, mHead1Input1.Permute({0, 1, 4, 2, 3}), stream);
         matx::copy(mHead1Output2, mHead1Input2.Permute({0, 3, 1, 2}), stream);
 
         matx::tensor_t<matx::matxFp16, 5> mHead2Input1 = matx::make_tensor<matx::matxFp16>((matx::matxFp16*)src[1], {1, kChw32Groups, kH16, kW16, 32});
         matx::tensor_t<matx::matxFp16, 5> mHead2Output1 = matx::make_tensor<matx::matxFp16>((matx::matxFp16*)mTemp, {1, kChw32Groups, 32, kH16, kW16});
-        matx::tensor_t<matx::matxFp16, 4> mHead2Input2 = matx::make_tensor<matx::matxFp16>((matx::matxFp16*)mTemp, {1, 3, kChPerAnchor, kArea16});
-        matx::tensor_t<matx::matxFp16, 4> mHead2Output2 = matx::make_tensor<matx::matxFp16>((matx::matxFp16*)dst[1], {1, kArea16, 3, kChPerAnchor});
+        matx::tensor_t<matx::matxFp16, 4> mHead2Input2 = matx::make_tensor<matx::matxFp16>((matx::matxFp16*)mTemp, {1, kAnchorsPerPos, kChPerAnchor, kArea16});
+        matx::tensor_t<matx::matxFp16, 4> mHead2Output2 = matx::make_tensor<matx::matxFp16>((matx::matxFp16*)dst[1], {1, kArea16, kAnchorsPerPos, kChPerAnchor});
         matx::copy(mHead2Output1, mHead2Input1.Permute({0, 1, 4, 2, 3}), stream);
         matx::copy(mHead2Output2, mHead2Input2.Permute({0, 3, 1, 2}), stream);
 
         matx::tensor_t<matx::matxFp16, 5> mHead3Input1 = matx::make_tensor<matx::matxFp16>((matx::matxFp16*)src[2], {1, kChw32Groups, kH32, kW32, 32});
         matx::tensor_t<matx::matxFp16, 5> mHead3Output1 = matx::make_tensor<matx::matxFp16>((matx::matxFp16*)mTemp, {1, kChw32Groups, 32, kH32, kW32});
-        matx::tensor_t<matx::matxFp16, 4> mHead3Input2 = matx::make_tensor<matx::matxFp16>((matx::matxFp16*)mTemp, {1, 3, kChPerAnchor, kArea32});
-        matx::tensor_t<matx::matxFp16, 4> mHead3Output2 = matx::make_tensor<matx::matxFp16>((matx::matxFp16*)dst[2], {1, kArea32, 3, kChPerAnchor});
+        matx::tensor_t<matx::matxFp16, 4> mHead3Input2 = matx::make_tensor<matx::matxFp16>((matx::matxFp16*)mTemp, {1, kAnchorsPerPos, kChPerAnchor, kArea32});
+        matx::tensor_t<matx::matxFp16, 4> mHead3Output2 = matx::make_tensor<matx::matxFp16>((matx::matxFp16*)dst[2], {1, kArea32, kAnchorsPerPos, kChPerAnchor});
         matx::copy(mHead3Output1, mHead3Input1.Permute({0, 1, 4, 2, 3}), stream);
         matx::copy(mHead3Output2, mHead3Input2.Permute({0, 3, 1, 2}), stream);
         return true;

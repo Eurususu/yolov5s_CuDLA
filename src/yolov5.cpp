@@ -46,6 +46,22 @@ constexpr int kArea16     = kHeadW16 * kHeadH16;  // 1764
 constexpr int kArea32     = kHeadW32 * kHeadH32;  // 441
 constexpr int kGridTotal  = kArea8 + kArea16 + kArea32;  // 9261
 
+// Head style: v5 (default — anchor-based, 3 anchors x (nc+5) channels) or v8
+// (anchor-free DFL — 4*reg_max + nc channels per position, one box per grid
+// cell; selected via `make HEAD_STYLE=v8`, reg_max via REG_MAX=<n>, default
+// 16; yolo26 uses REG_MAX=1). Must match the exported ONNX head layout.
+#ifdef YOLO_HEAD_STYLE_V8
+#ifndef YOLO_REG_MAX
+#define YOLO_REG_MAX 16
+#endif
+constexpr int kRegMax        = YOLO_REG_MAX;
+constexpr int kAnchorsPerPos = 1;
+constexpr int kChPerPos      = 4 * kRegMax + kNumClasses;
+#else
+constexpr int kAnchorsPerPos = 3;
+constexpr int kChPerPos      = kNumClasses + 5;
+#endif
+
 template <typename T, int N> void printBuffer(const void *buffer)
 {
     size_t bytes    = N * sizeof(T);
@@ -116,9 +132,9 @@ yolov5::yolov5(std::string engine_path, Yolov5Backend backend)
     mBindingArray.push_back(output_buf_2);
 
     src = {mBindingArray[1], mBindingArray[2], mBindingArray[3]};
-    cudaMalloc((void **)&dst[0], sizeof(half) * 3 * (kNumClasses + 5) * kGridTotal);
-    dst[1] = reinterpret_cast<half *>(dst[0]) + 3 * (kNumClasses + 5) * kArea8;
-    dst[2] = reinterpret_cast<half *>(dst[1]) + 3 * (kNumClasses + 5) * kArea16;
+    cudaMalloc((void **)&dst[0], sizeof(half) * kAnchorsPerPos * kChPerPos * kGridTotal);
+    dst[1] = reinterpret_cast<half *>(dst[0]) + kAnchorsPerPos * kChPerPos * kArea8;
+    dst[2] = reinterpret_cast<half *>(dst[1]) + kAnchorsPerPos * kChPerPos * kArea16;
 
     mReformatRunner = new ReformatRunner();
 
@@ -310,10 +326,17 @@ std::vector<std::vector<float>> yolov5::postProcess(float confidence_threshold, 
 {
     checkCudaErrors(cudaMemsetAsync(parray, 0, parray_size, mStream));
     memset(parray_host, 0, parray_size);
+#ifdef YOLO_HEAD_STYLE_V8
+    decode_dfl_kernel_invoker((half *)dst[0],
+                              kGridTotal, kGridTotal, kNumClasses, kRegMax,
+                              confidence_threshold, nms_threshold, mAffineMatrix, parray, prior_ptr_dev,
+                              MAX_IMAGE_BBOX, mStream);
+#else
     decode_nms_kernel_invoker((half *)dst[0],
                               3 * kGridTotal, // boxes = anchors x positions
                               kGridTotal, kNumClasses, confidence_threshold, nms_threshold, mAffineMatrix, parray, prior_ptr_dev,
                               MAX_IMAGE_BBOX, mStream);
+#endif
     checkCudaErrors(cudaMemcpyAsync(parray_host, parray, parray_size, cudaMemcpyDeviceToHost, mStream));
     checkCudaErrors(cudaStreamSynchronize(mStream));
 
@@ -398,10 +421,17 @@ std::vector<std::vector<float>> yolov5::postProcess4Validation(float confidence_
 {
     checkCudaErrors(cudaMemsetAsync(parray, 0, parray_size, mStream));
     memset(parray_host, 0, parray_size);
+#ifdef YOLO_HEAD_STYLE_V8
+    decode_dfl_validate_kernel_invoker((half *)dst[0],
+                                       kGridTotal, kGridTotal, kNumClasses, kRegMax,
+                                       confidence_threshold, nms_threshold, mAffineMatrix, parray,
+                                       prior_ptr_dev, MAX_IMAGE_BBOX, mStream);
+#else
     decode_nms_validate_kernel_invoker((half *)dst[0],
                                        3 * kGridTotal, // boxes = anchors x positions
                                        kGridTotal, kNumClasses, confidence_threshold, nms_threshold, mAffineMatrix, parray,
                                        prior_ptr_dev, MAX_IMAGE_BBOX, mStream);
+#endif
     checkCudaErrors(cudaMemcpyAsync(parray_host, parray, parray_size, cudaMemcpyDeviceToHost, mStream));
     checkCudaErrors(cudaStreamSynchronize(mStream));
 

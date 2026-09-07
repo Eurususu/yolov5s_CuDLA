@@ -96,7 +96,21 @@ v8s / v11s / v5su 输出 `[1,144,H,W]`（reg_max=16，64+80），**yolo26s 为 `
 
 **v8 系的解法（P1 议题）**：① 图手术 —— 把通道维 Slice 折进后继 Conv 的权重（沿输入通道拆分 weight）；② 导出时补丁 C2f（cv1 拆成两个独立 Conv）；③ 直接用 v5su（v8 头 + C3 骨干，**已可部署**）。短期用 ③，中期做 ①。
 
-## 7. 兼容性保证
+## 7. P1 实测结果（2026-09-07）
+
+`make HEAD_STYLE=v8` 已实现并通过端到端验证：
+
+- 新增 [src/decode_dfl.cu](../src/decode_dfl.cu)：anchor-free DFL 解码 kernel（reg_max 为运行时参数，
+  16 覆盖 v5su/v8/v11，1 覆盖 yolo26；softmax 数值稳定实现 + dist2bbox + 纯 sigmoid 类别分数）
+- yolov5.cpp / matx_reformat.cu 通道几何按 `HEAD_STYLE` 切换：v5 = 3×(nc+5)/每位置 3 框，
+  v8 = 4×reg_max+nc/每位置 1 框（`kAnchorsPerPos`/`kChPerPos` 常量）
+- Makefile / CMake / 构建脚本接线：`HEAD_STYLE=v8 [REG_MAX=1]`，与 NUM_CLASSES/INPUT 同款"切换需重编两层"约定
+- **验证**：yolov5su FP16 @ DLA 672 → 9 个检测、框位置经视觉核验全部合理（bus/多行人/远车，
+  无错框）；v5 默认构建回归不变（80 类 13 目标）
+- 注意：v8 风格当前仅支持 FP16 部署（INT8 需 P2 的 QAT 工具链）；v8/v11/v26 原生骨干仍被
+  C2f 的 Slice 挡在 DLA 之外（见 P0 记录），v5su 可用
+
+## 8. 兼容性保证
 
 - `HEAD_STYLE` 默认 v5：现有全部脚本/文档/验证过的模型**零变化**
 - 新代码全部走新文件（decode_dfl.cu 等）+ 宏分派，不触碰 v5 路径

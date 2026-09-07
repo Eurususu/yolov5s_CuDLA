@@ -52,7 +52,15 @@ NVCC_FLAGS := -gencode arch=compute_87,code=sm_87
 INPUT_H ?= 672
 INPUT_W ?= 672
 NUM_CLASSES ?= 80
+# Head style: v5 (anchor-based, default) or v8 (anchor-free DFL, for the
+# Ultralytics family — v5su/v8/v11; yolo26 additionally uses REG_MAX=1).
+# Switching requires a matx rebuild + make clean (same as NUM_CLASSES).
+HEAD_STYLE ?= v5
+REG_MAX ?= 16
 ALL_CCFLAGS += -DYOLO_NUM_CLASSES=$(NUM_CLASSES) -DYOLO_INPUT_H=$(INPUT_H) -DYOLO_INPUT_W=$(INPUT_W)
+ifeq ($(HEAD_STYLE),v8)
+    ALL_CCFLAGS += -DYOLO_HEAD_STYLE_V8 -DYOLO_REG_MAX=$(REG_MAX)
+endif
 
 OPENCV_INCLUDE_PATH ?= /usr/include/opencv4/
 OPENCV_LIB_PATH ?= /usr/lib/aarch64-linux-gnu/

@@ -82,7 +82,21 @@ make HEAD_STYLE=v8    （新：anchor-free DFL）
 | **P2 v8 QAT** | `ultralytics_dla` 工具包（替换表 + QuantAdd/Concat 模块化 + qat.py 对 ultralytics trainer 的适配）→ INT8 全链路 | v8 INT8 + mAP 归因 | 3~5 天 |
 | **P3 yolo26 / v11 / v12** | 复用 P1/P2（同头风格，仅 yaml 差异）；v26 end2end 单独评估 | 各家族验证记录 | 按需 |
 
-## 6. 兼容性保证
+## 6. P0 实测结果（2026-09-07）
+
+**导出**：`ultralytics/scripts/export_dla.py`（monkeypatch `Detect.forward` 输出 per-level 原始头）已验证四家族：
+v8s / v11s / v5su 输出 `[1,144,H,W]`（reg_max=16，64+80），**yolo26s 为 `[1,84,H,W]`（reg_max=1，无 DFL，直接回归 4 距离）** —— 解码 kernel 需按 reg_max 参数化。
+
+**DLA 构建（FP16, 672, standalone）**：
+
+| 模型 | 结果 | 原因 |
+|---|---|---|
+| **yolov5su** | ✅ **PASSED**（19.4MB） | C3 骨干无 Shape/Slice，算子集与 v5 v7.0 同级 DLA 友好 |
+| yolov8s / yolo11s / yolo26s | ❌ 被 `C2f/C3k2` 的 `chunk(2,1)` 挡住 | 导出成 Shape→Slice 链；onnxsim 可消掉 Shape，但 **Slice 本身不被 standalone DLA 支持**（常量参数会被 TRT 物化为 Constant 层） |
+
+**v8 系的解法（P1 议题）**：① 图手术 —— 把通道维 Slice 折进后继 Conv 的权重（沿输入通道拆分 weight）；② 导出时补丁 C2f（cv1 拆成两个独立 Conv）；③ 直接用 v5su（v8 头 + C3 骨干，**已可部署**）。短期用 ③，中期做 ①。
+
+## 7. 兼容性保证
 
 - `HEAD_STYLE` 默认 v5：现有全部脚本/文档/验证过的模型**零变化**
 - 新代码全部走新文件（decode_dfl.cu 等）+ 宏分派，不触碰 v5 路径

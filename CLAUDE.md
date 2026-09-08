@@ -79,6 +79,8 @@ bash src/matx_reformat/build_matx_reformat.sh      # matx lib (offline via CCCL 
 make                                               # app; NUM_CLASSES defaults to 80 for COCO
 ```
 
+**NMS placement** (`--nms gpu|cpu`, default gpu): the GPU kernel is cross-suppression (removes boxes overlapping ANY higher-confidence same-class box, even suppressed ones) — fast but costs ~0.5 AP / ~4 AR vs greedy on COCO (v5s INT8 measured: 36.6 vs 37.1; mAP50 identical, loss concentrates at AP75 and recall). Use `--nms cpu` (greedy — torchvision/ultralytics semantics, exactly reproduces the reference numbers) for mAP reporting; default gpu for speed and single-image runs.
+
 matx unit test: `./test` from `src/matx_reformat/build/` (with that dir on `LD_LIBRARY_PATH`). No `LD_LIBRARY_PATH` is needed for the app itself — it is linked with `-Wl,-rpath` to `src/matx_reformat/build`.
 
 ### A1. Run and validate (single image / COCO val)

@@ -79,6 +79,8 @@ bash src/matx_reformat/build_matx_reformat.sh      # matx 库（CCCL shim 加持
 make                                               # 主程序；COCO 用默认 NUM_CLASSES=80
 ```
 
+**NMS 放置**（`--nms gpu|cpu`，默认 gpu）：GPU kernel 是交叉抑制（与任何更高置信度的同类别框重叠即删，包括已被抑制的框）—— 快，但在 COCO 上比贪心版低 ~0.5 AP / ~4 AR（v5s INT8 实测：36.6 vs 37.1；mAP50 完全相同，损失集中在 AP75 与 recall）。**报 mAP 用 `--nms cpu`**（贪心 —— torchvision/ultralytics 语义，精确复现参考数字）；默认 gpu 用于提速与单图。
+
 matx 单元测试：在 `src/matx_reformat/build/` 下运行 `./test`（该目录需在 `LD_LIBRARY_PATH`）。主程序本身不需要任何环境变量 —— 链接时已烧入 `-Wl,-rpath` 指向 `src/matx_reformat/build`。
 
 ### A1. 运行与验证（单图 / COCO 验证集）

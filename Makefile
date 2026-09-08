@@ -61,6 +61,10 @@ ALL_CCFLAGS += -DYOLO_NUM_CLASSES=$(NUM_CLASSES) -DYOLO_INPUT_H=$(INPUT_H) -DYOL
 ifeq ($(HEAD_STYLE),v8)
     ALL_CCFLAGS += -DYOLO_HEAD_STYLE_V8 -DYOLO_REG_MAX=$(REG_MAX)
 endif
+# Input quantization scale = the INT8 cache's images: entry (default = the
+# original COCO model's). Changing models with a different cache needs this.
+INPUT_SCALE ?= 0.00787209f
+ALL_CCFLAGS += -DYOLO_INPUT_SCALE=$(INPUT_SCALE)
 
 OPENCV_INCLUDE_PATH ?= /usr/include/opencv4/
 OPENCV_LIB_PATH ?= /usr/lib/aarch64-linux-gnu/

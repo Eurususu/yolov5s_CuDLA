@@ -129,7 +129,33 @@ v11/v26 的新堵点是 **C2PSA 注意力块**（Softmax/MatMul 类算子 standa
 与 Slice 无关的独立限制；出路：注意力替换为恒等（改训练配置 `attn=False` 重训）或
 接受该两代模型不上 standalone DLA。v5su（无注意力）与原生 v8 均可正常部署。
 
-## 9. 兼容性保证
+## 9. P2 实测结果（2026-09-08）：Ultralytics QAT → DLA INT8 全链路打通
+
+新增 `ultralytics/scripts/qat_dla.py`（Option#1 量化：QuantConv2d 替换 + QuantAdd，
+concat/mul scale 交由 translator 推导）+ `export_dla.py --qat`（加载量化 checkpoint、
+禁用 fuse、`use_fb_fake_quant` 发射 Q/DQ）。校准/微调用**免标签**的图像文件夹加载器
+（MSE 蒸馏不需要标签 —— 本机 val2017 即可驱动全流程；正式的 mAP 筛选微调在服务器用训练集）。
+
+**本机演示链路（yolov8s @ 672）**：
+```
+qat_dla.py quantize weights/yolov8s.pt --calib-dir <val2017> --ptq ptq_v8.pt --qat qat_v8.pt --epochs 1 --iters 20
+export_dla.py --weights qat_v8.pt --qat --size 672 --dynamic --save yolov8s_qat.onnx   # 138 Q/DQ, 0 Slice
+qdq_translator.py --infer_concat_scales --infer_mul_scales                             # → noqdq + cache
+build_dla_standalone_loadable_v8_int8.sh                                               # INT8 loadable (12.9MB)
+make HEAD_STYLE=v8 INPUT_SCALE=0.007874015718698502f                                   # INPUT_SCALE=缓存 images: 值
+```
+**结果：INT8 e2e 9 检测 @ 8.0ms，视觉核验无退化**（演示级校准：500 图/25 batch + 20 iter 微调；
+精度验收需服务器全量训练后跑 COCO mAP）。
+
+踩坑记录（全部已修）：量化器初始化需 `__init__` 帧名技巧骗过 pytorch-quantization 的调用者检查；
+权重量化器**逐输出通道**，C2f 拆分时 `_amax`（`[C,1,1,1]` 形状）必须随权重同切；
+checkpoint 里的实例级 bound-method forward 不可 pickle → 类级补丁；静态 ONNX 必须带
+`--dynamic` 才能配 trtexec 显式 shapes；QAT 模型禁止 fuse（BN 无法折叠进 QuantConv2d）。
+
+**支持矩阵更新**：yolov5 v7.0 / v5su / **v8 原生** = FP16+INT8 全链路 ✅；
+v11/v26 = 注意力算子限制（不变）。
+
+## 10. 兼容性保证
 
 - `HEAD_STYLE` 默认 v5：现有全部脚本/文档/验证过的模型**零变化**
 - 新代码全部走新文件（decode_dfl.cu 等）+ 宏分派，不触碰 v5 路径

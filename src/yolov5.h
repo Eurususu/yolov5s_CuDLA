@@ -166,7 +166,12 @@ class yolov5
     cuDLAContextHybrid *mCuDLACtx;
 #endif
 
-    float mInputScale   = 0.00787209;
+    // Input quantization scale = the calibration cache's `images:` entry (set via
+// make INPUT_SCALE=<value>; only mInputScale is consumed — see yolov5.cpp).
+#ifndef YOLO_INPUT_SCALE
+#define YOLO_INPUT_SCALE 0.00787209f
+#endif
+float mInputScale = YOLO_INPUT_SCALE;
     float mOutputScale1 = 0.0546086;
     float mOutputScale2 = 0.148725;
     float mOutputScale3 = 0.0546086;

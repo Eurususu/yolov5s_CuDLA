@@ -62,6 +62,11 @@ def split_c2f_chunk(module: C2f) -> None:
         half.conv.weight = torch.nn.Parameter(cv1.conv.weight.data[sl].clone())
         if half.conv.bias is not None:  # fused: BN folded into a per-channel bias
             half.conv.bias = torch.nn.Parameter(cv1.conv.bias.data[sl].clone())
+        # weight quantizers are PER-OUTPUT-CHANNEL: their calibrated _amax has one
+        # entry per output row and must be sliced together with the weight
+        wq = getattr(half.conv, "_weight_quantizer", None)
+        if wq is not None and getattr(wq, "_amax", None) is not None:
+            wq._amax = wq._amax[sl].clone()  # slice dim0: amax is [C] or [C,1,1,1]
         bn = getattr(half, "bn", None)  # absent after fuse (BN folded into conv)
         if bn is not None:
             for p in ("weight", "bias", "running_mean", "running_var"):
@@ -89,6 +94,9 @@ def main():
     parser.add_argument("--dynamic", action="store_true", help="dynamic batch axis")
     parser.add_argument("--device", type=str, default="cuda:0")
     parser.add_argument("--opset", type=int, default=13)
+    parser.add_argument("--qat", action="store_true",
+                        help="load a QAT/PTQ checkpoint saved by qat_dla.py (torch.load whole-model, "
+                             "no fuse) and emit Q/DQ nodes for the qdq_translator INT8 path")
     args = parser.parse_args()
 
     if "x" in args.size.lower():
@@ -97,10 +105,20 @@ def main():
         h = w = int(args.size)
     save = args.save or (Path(args.weights).stem + f"_raw_{h}x{w}.onnx")
 
-    model = YOLO(args.weights)
-    net = model.model.to(args.device).float().eval()
-    if hasattr(net, "fuse"):
-        net.fuse()
+    if args.qat:
+        # whole pickled model with Quant* modules (quantizers/calibrated amax intact);
+        # MUST NOT fuse — BN folding into QuantConv2d is unsupported
+        import qat_dla  # noqa: F401 — sibling module owning the classes/functions pickled as __main__.*
+        import sys as _sys
+        for _name in ("QuantAdd", "bottleneck_forward_quant"):
+            setattr(_sys.modules["__main__"], _name, getattr(qat_dla, _name))
+        net = torch.load(args.weights, map_location=args.device, weights_only=False)["model"]
+        net = net.to(args.device).float().eval()
+    else:
+        model = YOLO(args.weights)
+        net = model.model.to(args.device).float().eval()
+        if hasattr(net, "fuse"):
+            net.fuse()
 
     head = net.model[-1]
     assert isinstance(head, Detect), f"unsupported head type: {type(head).__name__}"
@@ -128,6 +146,10 @@ def main():
     assert worst < 1e-2, "patched model diverged from reference!"
 
     Detect.forward = raw_forward  # emit raw per-level outputs during export
+
+    # QAT models export their quantizers as real QuantizeLinear/DequantizeLinear nodes
+    from pytorch_quantization import nn as quant_nn
+    quant_nn.TensorQuantizer.use_fb_fake_quant = args.qat
 
     dummy = torch.zeros(1, 3, h, w, device=args.device)
     with torch.no_grad():

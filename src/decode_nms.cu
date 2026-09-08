@@ -492,6 +492,15 @@ static __global__ void nms_kernel(float *bboxes, int max_objects, float threshol
     }
 }
 
+void nms_kernel_invoker(float *parray, int max_objects, float threshold, cudaStream_t stream)
+{
+    // GPU twin of cpu_nms — same class-aware keepflag semantics, in-place on
+    // parray; O(n^2) spread across max_objects threads instead of one.
+    auto grid  = grid_dims(max_objects);
+    auto block = block_dims(max_objects);
+    checkCudaKernel(nms_kernel<<<grid, block, 0, stream>>>(parray, max_objects, threshold));
+}
+
 void decode_nms_validate_kernel_invoker(float *predict, int num_bboxes, int fm_area, int num_classes,
                                         float confidence_threshold, float nms_threshold, float *affine_matrix,
                                         float *parray, const float *prior_box, int max_objects, cudaStream_t stream)

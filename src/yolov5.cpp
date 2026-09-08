@@ -331,11 +331,13 @@ std::vector<std::vector<float>> yolov5::postProcess(float confidence_threshold, 
                               kGridTotal, kGridTotal, kNumClasses, kRegMax,
                               confidence_threshold, nms_threshold, mAffineMatrix, parray, prior_ptr_dev,
                               MAX_IMAGE_BBOX, mStream);
+    nms_kernel_invoker(parray, MAX_IMAGE_BBOX, nms_threshold, mStream); // was missing entirely
 #else
     decode_nms_kernel_invoker((half *)dst[0],
                               3 * kGridTotal, // boxes = anchors x positions
                               kGridTotal, kNumClasses, confidence_threshold, nms_threshold, mAffineMatrix, parray, prior_ptr_dev,
                               MAX_IMAGE_BBOX, mStream);
+    nms_kernel_invoker(parray, MAX_IMAGE_BBOX, nms_threshold, mStream); // was missing entirely
 #endif
     checkCudaErrors(cudaMemcpyAsync(parray_host, parray, parray_size, cudaMemcpyDeviceToHost, mStream));
     checkCudaErrors(cudaStreamSynchronize(mStream));
@@ -432,6 +434,7 @@ std::vector<std::vector<float>> yolov5::postProcess4Validation(float confidence_
                                        kGridTotal, kNumClasses, confidence_threshold, nms_threshold, mAffineMatrix, parray,
                                        prior_ptr_dev, MAX_IMAGE_BBOX, mStream);
 #endif
+    nms_kernel_invoker(parray, MAX_IMAGE_BBOX, nms_threshold, mStream); // GPU NMS replaces cpu_nms below
     checkCudaErrors(cudaMemcpyAsync(parray_host, parray, parray_size, cudaMemcpyDeviceToHost, mStream));
     checkCudaErrors(cudaStreamSynchronize(mStream));
 
@@ -456,7 +459,7 @@ std::vector<std::vector<float>> yolov5::postProcess4Validation(float confidence_
         bas.emplace_back(left, top, right, bottom, confident, label);
     }
     det_results.clear();
-    bas = cpu_nms(bas, nms_threshold);
+    // (NMS already done on-GPU above — keepflag filter picks survivors)
     for (auto &item : bas)
     {
         det_results.push_back({item.left, item.top, item.right, item.bottom, item.class_label, item.confidence});

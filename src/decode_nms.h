@@ -68,6 +68,9 @@ void decode_nms_kernel_invoker(float *buffers, int num_bboxes, int fm_area, int 
                                float nms_threshold, float *parray, float *prior_box, int max_objects,
                                cudaStream_t stream);
 
+// Standalone GPU NMS (same semantics as cpu_nms, in-place on parray).
+void nms_kernel_invoker(float *parray, int max_objects, float threshold, cudaStream_t stream);
+
 // Anchor-free DFL decode (Ultralytics v5su/v8/v11/v26 heads, make HEAD_STYLE=v8).
 // Same calling convention as the decode_nms variants plus reg_max.
 void decode_dfl_validate_kernel_invoker(float *buffers, int num_bboxes, int fm_area, int num_classes, int reg_max,

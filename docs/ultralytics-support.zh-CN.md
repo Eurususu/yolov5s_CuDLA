@@ -3,7 +3,8 @@
 目标：在现有 cuDLA 部署链路上支持 **Ultralytics 现代模型家族**（v5u / v8 / v11 / v12 / v26 等，
 已验证源码 `ultralytics/` @ 8.4.142），同时**完全兼容**现有的 yolov5 v7.0 路线。
 
-> 事实均核对于本仓库 `ultralytics/` 源码（行号可跳转）；
+> **实操命令手册**（从 .pt 到检测结果的全链路命令，按序可抄）见
+> [ultralytics-family-commands.zh-CN.md](ultralytics-family-commands.zh-CN.md)；> 事实均核对于本仓库 `ultralytics/` 源码（行号可跳转）；
 > 现有链路知识见根 CLAUDE.md 两条流水线与 yolov5_dla/docs/qat-internals.zh-CN.md。
 
 ---

@@ -144,6 +144,12 @@ class yolov5
     //!
     std::vector<std::vector<float>> postProcess4Validation(float confidence_threshold, float nms_threshold);
 
+    // NMS placement: true = GPU (nms_kernel, default — in-place on parray,
+    // O(n^2) across threads), false = CPU (cpu_nms — the original
+    // single-threaded path, kept as a verification fallback). Runtime switch:
+    // `--nms cpu` / `--nms gpu` (default gpu), no rebuild needed.
+    bool mGpuNms = true;
+
   private:
     int pushImg(void *imgBuffer, int numImg, bool fromCPU = true);
 

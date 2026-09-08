@@ -140,6 +140,7 @@ int main(int argc, char **argv)
     std::string coco_path   = input.getCmdOption("--coco_path");
     std::string image_path  = input.getCmdOption("--image");
     std::string list_file   = input.getCmdOption("--list");
+    std::string nms_place  = input.getCmdOption("--nms"); // gpu (default) | cpu
     if (list_file.empty())
     {
         list_file = "./data/coco_val_2017_list.txt";
@@ -156,6 +157,7 @@ int main(int argc, char **argv)
     }
 
     yolov5 yolov5_infer(engine_path, backend);
+    yolov5_infer.mGpuNms = (nms_place != "cpu"); // --nms cpu selects the CPU path
 
     std::vector<cv::Mat>            bgr_imgs;
     std::vector<std::string>        imgPathList = readCocoPaths(coco_path, list_file);

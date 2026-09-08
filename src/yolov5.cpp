@@ -62,6 +62,8 @@ constexpr int kAnchorsPerPos = 3;
 constexpr int kChPerPos      = kNumClasses + 5;
 #endif
 
+static BoxArray cpu_nms(BoxArray &boxes, float threshold); // defined below; used by the --nms cpu path
+
 template <typename T, int N> void printBuffer(const void *buffer)
 {
     size_t bytes    = N * sizeof(T);
@@ -331,13 +333,15 @@ std::vector<std::vector<float>> yolov5::postProcess(float confidence_threshold, 
                               kGridTotal, kGridTotal, kNumClasses, kRegMax,
                               confidence_threshold, nms_threshold, mAffineMatrix, parray, prior_ptr_dev,
                               MAX_IMAGE_BBOX, mStream);
-    nms_kernel_invoker(parray, MAX_IMAGE_BBOX, nms_threshold, mStream); // was missing entirely
+    if (mGpuNms)
+        nms_kernel_invoker(parray, MAX_IMAGE_BBOX, nms_threshold, mStream);
 #else
     decode_nms_kernel_invoker((half *)dst[0],
                               3 * kGridTotal, // boxes = anchors x positions
                               kGridTotal, kNumClasses, confidence_threshold, nms_threshold, mAffineMatrix, parray, prior_ptr_dev,
                               MAX_IMAGE_BBOX, mStream);
-    nms_kernel_invoker(parray, MAX_IMAGE_BBOX, nms_threshold, mStream); // was missing entirely
+    if (mGpuNms)
+        nms_kernel_invoker(parray, MAX_IMAGE_BBOX, nms_threshold, mStream);
 #endif
     checkCudaErrors(cudaMemcpyAsync(parray_host, parray, parray_size, cudaMemcpyDeviceToHost, mStream));
     checkCudaErrors(cudaStreamSynchronize(mStream));
@@ -360,6 +364,21 @@ std::vector<std::vector<float>> yolov5::postProcess(float confidence_threshold, 
         float confident = pbox[4];
         int   label     = pbox[5];
         det_results.push_back({left, top, right, bottom, confident, (float)label});
+    }
+
+    if (!mGpuNms)
+    {
+        // CPU placement: the GPU pass above was skipped, so parray still holds
+        // ALL candidates (keepflag==1) — dedup here instead.
+        BoxArray all;
+        for (int i = 0; i < count; i++)
+        {
+            float *pbox = parray_host + 1 + i * NUM_BOX_ELEMENT;
+            all.emplace_back(pbox[0], pbox[1], pbox[2], pbox[3], pbox[4], (int)pbox[5]);
+        }
+        det_results.clear();
+        for (const auto &b : cpu_nms(all, nms_threshold))
+            det_results.push_back({b.left, b.top, b.right, b.bottom, b.confidence, b.class_label});
     }
 
     return det_results;
@@ -434,7 +453,8 @@ std::vector<std::vector<float>> yolov5::postProcess4Validation(float confidence_
                                        kGridTotal, kNumClasses, confidence_threshold, nms_threshold, mAffineMatrix, parray,
                                        prior_ptr_dev, MAX_IMAGE_BBOX, mStream);
 #endif
-    nms_kernel_invoker(parray, MAX_IMAGE_BBOX, nms_threshold, mStream); // GPU NMS replaces cpu_nms below
+    if (mGpuNms)
+        nms_kernel_invoker(parray, MAX_IMAGE_BBOX, nms_threshold, mStream); // else: cpu_nms below
     checkCudaErrors(cudaMemcpyAsync(parray_host, parray, parray_size, cudaMemcpyDeviceToHost, mStream));
     checkCudaErrors(cudaStreamSynchronize(mStream));
 
@@ -459,7 +479,8 @@ std::vector<std::vector<float>> yolov5::postProcess4Validation(float confidence_
         bas.emplace_back(left, top, right, bottom, confident, label);
     }
     det_results.clear();
-    // (NMS already done on-GPU above — keepflag filter picks survivors)
+    if (!mGpuNms)
+        bas = cpu_nms(bas, nms_threshold); // CPU placement (keepflag filter above kept all)
     for (auto &item : bas)
     {
         det_results.push_back({item.left, item.top, item.right, item.bottom, item.class_label, item.confidence});

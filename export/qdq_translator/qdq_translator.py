@@ -102,6 +102,21 @@ ARGPARSER.add_argument(
     'For element-wise nodes consuming from Convs w/o Q/DQ nodes in between, insert unary scales.')
 ARGPARSER.add_argument('--verbose', action='store_true', help='Increase verbosity.')
 
+def sanity_check_input_onnx(model_path):
+    """Refuse no-Q/DQ graphs: translating one silently produces a garbage cache
+    (default 1/127 scales, no images entry). The sample's SHIPPED
+    yolov5_trimmed_qat.onnx is a no-Q PTQ-style graph meant to be used directly
+    with the shipped qat2ptq.cache — it must never go through this translator."""
+    model = onnx.load(model_path)
+    nq = sum(1 for n in model.graph.node if n.op_type == "QuantizeLinear")
+    if nq == 0:
+        logging.error(f"{model_path} has ZERO QuantizeLinear nodes — not a QAT (Q/DQ) graph. "
+                      "If this is the sample's shipped yolov5_trimmed_qat.onnx: use it directly with the "
+                      "shipped qat2ptq.cache in trtexec; only retrained qat.py exports go through the translator.")
+        sys.exit(1)
+    logging.info(f"input has {nq} QuantizeLinear nodes")
+
+
 class QATModelParser:
     """
     Parse the QAT ONNX model with the following steps:
@@ -665,6 +680,7 @@ def main(args):
     os.makedirs(args.output_dir, exist_ok=True)
     parser = QATModelParser()
     for onnx_model in args.input_onnx_models:
+        sanity_check_input_onnx(onnx_model)
         logging.info(f'Parsing {onnx_model}...')
         parser.parse(onnx_model,
                      args.output_dir,

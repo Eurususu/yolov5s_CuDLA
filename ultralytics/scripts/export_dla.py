@@ -112,6 +112,11 @@ def main():
         import sys as _sys
         for _name in ("QuantAdd", "bottleneck_forward_quant"):
             setattr(_sys.modules["__main__"], _name, getattr(qat_dla, _name))
+        # class-level forward patches do NOT survive pickling — re-apply, else
+        # Bottleneck exports the plain (un-QuantAdd) residual and its cv2 chain
+        # loses all Q nodes -> unexpected FP16 fallback of the bottleneck convs
+        from ultralytics.nn.modules.block import Bottleneck
+        Bottleneck.forward = qat_dla.bottleneck_forward_quant
         net = torch.load(args.weights, map_location=args.device, weights_only=False)["model"]
         net = net.to(args.device).float().eval()
     else:

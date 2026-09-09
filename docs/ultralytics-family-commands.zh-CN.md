@@ -132,7 +132,7 @@ make clean && make HEAD_STYLE=v8 INPUT_SCALE=0.007874015718698502f
     --image data/images/image.jpg --backend cudla_int8
 ```
 
-参考结果（本机演示级校准）：9 个检测 @ 8.0ms，视觉核验与 FP16 一致、无量化退化。
+参考结果（演示级校准）：9 个检测 @ 3.94ms（占比修复后），视觉核验与 FP16 一致。
 
 ---
 

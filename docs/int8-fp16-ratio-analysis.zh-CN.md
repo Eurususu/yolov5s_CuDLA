@@ -70,6 +70,13 @@ analyze('v8s INT8',
         'data/model/yolov8s_qat_precision_config_calib.cache',
         {'/model.22/cv2.0/cv2.0.2/Conv','/model.22/cv2.1/cv2.1.2/Conv','/model.22/cv2.2/cv2.2.2/Conv',
          '/model.22/cv3.0/cv3.0.2/Conv','/model.22/cv3.1/cv3.1.2/Conv','/model.22/cv3.2/cv3.2.2/Conv'})
+
+# v5su
+analyze('v5su INT8',
+        'data/model/yolov5su_qat_noqdq.onnx',
+        'data/model/yolov5su_qat_precision_config_calib.cache',
+        {'/model.24/cv2.0/cv2.0.2/Conv','/model.24/cv2.1/cv2.1.2/Conv','/model.24/cv2.2/cv2.2.2/Conv',
+         '/model.24/cv3.0/cv3.0.2/Conv','/model.24/cv3.1/cv3.1.2/Conv','/model.24/cv3.2/cv3.2.2/Conv'})
 EOF
 ```
 
@@ -88,7 +95,8 @@ EOF
 
 ### 3.1 确认意外层缺的是 scale（对比两代缓存的 key 覆盖）
 
-```python
+```bash
+python3 << 'EOF'
 def keys(path):
     s = set()
     for line in open(path):
@@ -98,7 +106,8 @@ def keys(path):
 
 c5 = keys('data/model/yolov5_coco_qat_9.9_precision_config_calib.cache')  # v7.0 正常
 c8 = keys('data/model/yolov8s_qat_precision_config_calib.cache')          # v8 缺
-
+c5u = keys('data/model/yolov5su_qat_precision_config_calib.cache')        # v5su 缺
+EOF
 # v7.0 的瓶颈 cv2 路径三件套全在：
 #   cv2/conv/Conv_output_0 ✓  cv2/act/Sigmoid_output_0 ✓  cv2/act/Mul_output_0 ✓
 # v8 只有 Sigmoid（且是 1/127 默认值），Conv 和 Mul 都缺！
@@ -115,9 +124,17 @@ for n in g.node:
     if n.op_type == 'Mul' and '/model.4/m.0/cv2/act' in (n.name or ''):
         consumers = [c.op_type for c in g.node if any(i == n.output[0] for i in c.input)]
         print('cv2/Mul ->', consumers)
+
+m = onnx.load('data/model/yolov5su_qat.onnx')   # QAT 图（带 Q/DQ 的那份）
+g = m.graph
+for n in g.node:
+    if n.op_type == 'Mul' and '/model.4/m/m.0/cv2/act' in (n.name or ''):
+        consumers = [c.op_type for c in g.node if any(i == n.output[0] for i in c.input)]
+        print('cv2/Mul ->', consumers)
+EOF
         # 修复前输出: ['Add']           ← 没有 QuantizeLinear！Q 丢了
         # 修复后输出: ['QuantizeLinear'] ← 正常
-EOF
+
 ```
 
 ### 3.3 根因
@@ -198,6 +215,7 @@ python3 test_coco_map.py --predict predict.json --coco data/coco/
 | mAP50 | — | 0.618 |
 | AR@100 | — | 0.637 |
 | 缓存 `images:` | 3c010204 | 3c010204（不变，C++ 无需改） |
+| **v5su（用户重建）** | 8.9ms / mAP 42.4 | **3.47ms（2.57×）/ mAP 42.6（+0.2）** |
 
 意外层只占 ~9% 计算量，但在 DLA 上 FP16 = 2× 成本 + 逐层开销，吃掉了**一半**推理时间。
 
@@ -214,8 +232,8 @@ Concat。Option#1 量化只给 conv **输入**配量化器，这些层的**输�
 | 模型 | mAP50-95 | 推理 | INT8 占比 | 备注 |
 |---|---|---|---|---|
 | v5s (v7.0) INT8 | 37.1 | 3.9ms | 95% | 官方基线 |
-| v8s 原生 INT8 | **44.6** | **3.94ms** | 92% | 速度精度双优，新主力 |
-| v5su INT8 | 42.4（待重导出复核） | 预计 ~4.5ms | 预计 ~92% | 重新导出后同步受益 |
+| **v5su INT8（重建后）** | **42.6** | **3.47ms** | ~92% | **速度冠军**：C3 骨干无 chunk 拆分，层少开销低 |
+| v8s 原生 INT8 | **44.6** | 3.94ms | 92% | **精度冠军**：C2f 需拆分使层数翻倍，略慢 |
 
 ## 9. 经验清单
 

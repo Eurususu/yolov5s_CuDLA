@@ -162,6 +162,9 @@ EOF
 
 ---
 
+> 深入研究：INT8/FP16 层占比分析与提升（含 QuantAdd 导出 bug 排查）见
+> [int8-fp16-ratio-analysis.zh-CN.md](int8-fp16-ratio-analysis.zh-CN.md)。
+
 ## 4. 参数配套速查（换模型/分辨率必读）
 
 | 环节 | 参数 | 必须一致的对方 |

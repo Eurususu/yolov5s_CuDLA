@@ -156,6 +156,9 @@ checkpoint 里的实例级 bound-method forward 不可 pickle → 类级补丁�
 **支持矩阵更新**：yolov5 v7.0 / v5su / **v8 原生** = FP16+INT8 全链路 ✅；
 v11/v26 = 注意力算子限制（不变）。
 
+另见 [int8-fp16-ratio-analysis.zh-CN.md](int8-fp16-ratio-analysis.zh-CN.md)：
+INT8/FP16 占比分析与量化残差导出 bug 的完整排查实录（v8s 7.9→3.94ms）。
+
 ## 10. 兼容性保证
 
 - `HEAD_STYLE` 默认 v5：现有全部脚本/文档/验证过的模型**零变化**

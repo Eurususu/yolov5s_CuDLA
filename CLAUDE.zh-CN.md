@@ -132,7 +132,7 @@ python3 qdq_translator.py --input_onnx_models=../../data/model/yolov5_trimmed_qa
 
 之后：复制 [build_dla_standalone_loadable_8.26.sh](data/model/build_dla_standalone_loadable_8.26.sh) 作模板，改 3 处路径（缓存源、`_noqdq.onnx`、输出 `.bin`）后运行；3 个检测头 conv 的 FP16 `--layerPrecisions` 不用动。用新缓存的 `images:` 十六进制条目（大端 IEEE-754）对比 src/yolov5.cpp 的 `mInputScale`，不同则更新。最后 `make` + `make validate_cudla_int8 ENGINE=...`。
 
-参考：仓库保留的 8.26 重训练闭环（`yolov5_trimmed_qat_8.26.*` → `yolov5_8.26.int8...bin`）：COCO mAP50-95 = **37.1**（与原版持平），输入 scale 逐位相同，`layer_arg.txt` 为空（那是"最大 FP16 建议清单"，不是必需清单）。
+参考：仓库保留两轮重训练闭环 —— 9.9（`yolov5_coco_qat_9.9.*`，mAP 37.0）与 8.26（`yolov5_trimmed_qat_8.26.*` → `yolov5_8.26.int8...bin`）：COCO mAP50-95 = **37.1**（与原版持平），输入 scale 逐位相同，`layer_arg.txt` 为空（那是"最大 FP16 建议清单"，不是必需清单）。两次独立重训均复现官方 INT8 精度。
 
 ## 线路 B —— 自定义数据集：训练 → QAT → DLA 部署
 

@@ -132,7 +132,7 @@ python3 qdq_translator.py --input_onnx_models=../../data/model/yolov5_trimmed_qa
 
 Then: copy [build_dla_standalone_loadable_8.26.sh](data/model/build_dla_standalone_loadable_8.26.sh) as a template, repoint its 3 paths (cache source, `_noqdq.onnx`, output `.bin`) and run it; the 3 head-conv FP16 `--layerPrecisions` stay unchanged. Compare the new cache's `images:` hex entry (big-endian IEEE-754) with `mInputScale` in src/yolov5.cpp — update if different. Finally `make` + `make validate_cudla_int8 ENGINE=...`.
 
-Reference: the completed 8.26 retrain cycle lives in the repo (`yolov5_trimmed_qat_8.26.*` → `yolov5_8.26.int8...bin`): COCO mAP50-95 = **37.1** (equal to the shipped model), identical input scale, empty `layer_arg.txt` (a maximal FP16 suggestion list — not a requirement).
+Reference: two completed retrain cycles live in the repo — 9.9 (`yolov5_coco_qat_9.9.*`, mAP 37.0) and 8.26 (mAP 37.1) (`yolov5_trimmed_qat_8.26.*` → `yolov5_8.26.int8...bin`): COCO mAP50-95 = **37.1** (equal to the shipped model), identical input scale, empty `layer_arg.txt` (a maximal FP16 suggestion list — not a requirement). Two independent reproductions of the official INT8 quality.
 
 ## Pipeline B — Custom Dataset: Train → QAT → DLA Deployment
 

@@ -36,7 +36,7 @@ NVIDIA 官方示例：将 QAT（量化感知训练）后的 YOLOv5s 部署到 Or
 
 **`yolov5-qat` 覆盖层对 `models/common.py` 的改动**（唯一被修改的文件，与上游 v7.0 差异 ~35 行）：`C3TR`、`C3`、`SPP`、`SPPF`、`Focus`、`GhostConv`、`Classify` 中所有函数式 `torch.cat(..., 1)` 都改为经由 `self.concat = Concat(1)` 子模块调用。原因：`quantization/quantize.py` 的 `initialize()` 在 `--all-node-with-qdq`（[export/README.md](export/README.md) 的 Option#2）时会把 `models.common.Concat → QuantConcat`（以及 `nn.SiLU → QuantSiLU`）注册进 pytorch-quantization 的模块替换表 —— 这是按"模块类"做的替换，只有 Concat 是模块才能被换掉，函数式 `torch.cat` 永远无法替换。而 DLA 要求图中每个算子（包括 Concat）都有 INT8 scale（GPU 上 TensorRT 允许 concat 以更高精度运行；Option#1 路径下 concat 没有训练出的 scale，qdq_translator 的 `--infer_concat_scales` 就是为它服务的）。该改动纯属结构性：数值结果与导出的 ONNX 图完全不变。
 
-DLA I/O 格式限制（这正是存在 MatX 重排步骤的原因）：INT8 输入必须为 `kDLA_LINEAR`/`kDLA_HWC4`/`kCHW32`，FP16 输入输出为 `kCHW16`；本示例采用 INT8 HWC4 输入 + FP16 CHW16 输出。
+项目全程遇到的 DLA 算子障碍总账（Slice/注意力硬障碍、concat/mul/add scale 要求及解法）见 [docs/dla-unsupported-ops.zh-CN.md](docs/dla-unsupported-ops.zh-CN.md)。DLA I/O 格式限制（这正是存在 MatX 重排步骤的原因）：INT8 输入必须为 `kDLA_LINEAR`/`kDLA_HWC4`/`kCHW32`，FP16 输入输出为 `kCHW16`；本示例采用 INT8 HWC4 输入 + FP16 CHW16 输出。
 
 ## 混合模式与独立模式的选择
 

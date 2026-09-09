@@ -36,7 +36,7 @@ Pipeline: CPU (OpenCV decode + letterbox) → GPU (MatX reformat FP32→DLA inpu
 
 **What the `yolov5-qat` overlay changes in `models/common.py`** (the only modified file, ~35 lines vs upstream v7.0): every functional `torch.cat(..., 1)` in `C3TR`, `C3`, `SPP`, `SPPF`, `Focus`, `GhostConv` and `Classify` is rerouted through a `self.concat = Concat(1)` submodule. Why: `quantization/quantize.py:initialize()` with `--all-node-with-qdq` (Option#2 in [export/README.md](export/README.md)) registers `models.common.Concat → QuantConcat` (and `nn.SiLU → QuantSiLU`) in pytorch-quantization's module-replacement map — a class-based swap that is only possible because Concat is a module; functional `torch.cat` could never be replaced. DLA requires an INT8 scale on every op including Concat (on GPU, TensorRT may let concat run at higher precision; qdq_translator's `--infer_concat_scales` exists for the Option#1 path where concat has no trained scale). The change is purely structural: identical numerics, identical exported ONNX graph.
 
-DLA I/O format constraints (why the MatX reformat steps exist): INT8 input must be `kDLA_LINEAR`/`kDLA_HWC4`/`kCHW32`, FP16 in/out `kCHW16`; the sample uses INT8 HWC4 input + FP16 CHW16 output.
+For the full inventory of DLA operator blockers hit in this project (Slice/attention hard blockers, concat/mul/add scale requirements) and their resolutions, see [docs/dla-unsupported-ops.zh-CN.md](docs/dla-unsupported-ops.zh-CN.md) (Chinese). DLA I/O format constraints (why the MatX reformat steps exist): INT8 input must be `kDLA_LINEAR`/`kDLA_HWC4`/`kCHW32`, FP16 in/out `kCHW16`; the sample uses INT8 HWC4 input + FP16 CHW16 output.
 
 ## Hybrid vs Standalone Mode Selection
 

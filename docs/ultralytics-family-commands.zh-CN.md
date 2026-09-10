@@ -10,6 +10,8 @@ v5 v7.0 家族（含自定义数据集）的路线见根目录 CLAUDE.md 的「�
 
 ---
 
+> QAT 训练的完整参数说明、机制与踩坑记录见 [ultralytics/CLAUDE.dla.zh-CN.md](../ultralytics/CLAUDE.dla.zh-CN.md)。
+
 ## 0. 前置条件
 
 - **Jetson 端**（构建 loadable + C++ 部署 + 演示级校准）：环境见根 CLAUDE.md「运行环境」

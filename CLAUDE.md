@@ -30,9 +30,16 @@ Pipeline: CPU (OpenCV decode + letterbox) → GPU (MatX reformat FP32→DLA inpu
   - [src/cudla_context_hybrid.cpp](src/cudla_context_hybrid.cpp) — hybrid mode: CUDA-allocated buffers registered to cuDLA via `cudlaMemRegister`; task submitted on a CUDA stream. Simplest integration path.
   - [src/cudla_context_standalone.cpp](src/cudla_context_standalone.cpp) — standalone mode: NvSciBuf/NvSciSync for buffers and fences, imported into CUDA as external memory/semaphores. Avoids CUDA context creation on the DLA path; deterministic semaphore variant (`USE_DETERMINISTIC_SEMAPHORE`) is a workaround for older DriveOS/JetPack NvSciSync behavior.
   - Both context classes are intentionally self-contained (no sample dependencies) so users can copy them into their own projects — keep them that way when editing.
+- [src/decode_dfl.cu](src/decode_dfl.cu) — anchor-free DFL decode kernels for the Ultralytics family (v5su/v8/v11/v26 heads; `make HEAD_STYLE=v8`). Implements the verified ultralytics decode math: DFL softmax integral (reg_max runtime param, 1 = yolo26), dist2bbox, plain sigmoid class scores. Classic v5 decode stays in `decode_nms.cu`; `nms_kernel_invoker` is the shared GPU NMS (both files' kernels are head-style specific, NMS is not).
 - [src/matx_reformat/](src/matx_reformat/) — separate CMake library wrapping the MatX submodule (pimpl pattern: `ReformatRunner`). Converts between DLA tensor layouts and planar formats: `ReformatImage`/`ReformatImageV2` (input CHW→HWC4/CHW16), `Run`/`Transpose` (output CHW16→planar for the 3 YOLOv5 heads at strides 8/16/32). Channel geometry derives from the same `YOLO_NUM_CLASSES` macro (CHW16/CHW32 pad head channels to multiples of 16/32).
 - [data/model/](data/model/) — trtexec scripts that compile ONNX models into DLA loadables. INT8 loadable uses `--inputIOFormats=int8:dla_hwc4 --outputIOFormats=fp16:chw16` with the last head convs forced to FP16 (`--layerPrecisions`). `build_dla_standalone_loadable_v2.sh` falls back more layers to FP16 (higher mAP, slower). Requires trtexec with `--buildDLAStandalone` (patch in `data/trtexec-dla-standalone-trtv8.5.patch` only for TRT 8.5 / pre-JetPack-6.0).
 - [export/](export/) — training-side tooling, independent of the C++ app: `yolov5-qat/` is the original overlay for an ultralytics yolov5 v7.0 checkout; `qdq_translator/` converts a QAT ONNX (Q/DQ nodes) into a PTQ ONNX + INT8 calibration cache. The server-side working copy lives at `yolov5_dla/` (v7.0 + the overlay, hardened with a CLI-parameterized `qat.py`, torch-2.x amp fixes and custom-dataset pycocotools support — see its own CLAUDE.md). The overlay is exactly 4 files: 3 new (`quantization/quantize.py`, `quantization/rules.py`, `scripts/qat.py`) + 1 modified (`models/common.py`).
+
+- `ultralytics/` — the modern-family toolkit (clone of ultralytics 8.4.142, `.git` removed, committed): `scripts/qat_dla.py` (PTQ/QAT, best-mAP selection — see its own [CLAUDE.dla.zh-CN.md](ultralytics/CLAUDE.dla.zh-CN.md)) and `scripts/export_dla.py` (raw-head export + C2f chunk-split + Q/DQ emission). Zero upstream files modified.
+
+### Docs index
+
+Deep-dive documents in [docs/](docs/) (all Chinese): [ultralytics-support.zh-CN.md](docs/ultralytics-support.zh-CN.md) (P0–P2 design + measured results), [ultralytics-family-commands.zh-CN.md](docs/ultralytics-family-commands.zh-CN.md) (step-by-step command cookbook), [int8-fp16-ratio-analysis.zh-CN.md](docs/int8-fp16-ratio-analysis.zh-CN.md) (INT8/FP16 proportion analysis + the QuantAdd export-bug postmortem), [dla-unsupported-ops.zh-CN.md](docs/dla-unsupported-ops.md) (operator-blocker inventory with TODOs). QAT internals: [yolov5_dla/docs/qat-internals.zh-CN.md](yolov5_dla/docs/qat-internals.zh-CN.md).
 
 **What the `yolov5-qat` overlay changes in `models/common.py`** (the only modified file, ~35 lines vs upstream v7.0): every functional `torch.cat(..., 1)` in `C3TR`, `C3`, `SPP`, `SPPF`, `Focus`, `GhostConv` and `Classify` is rerouted through a `self.concat = Concat(1)` submodule. Why: `quantization/quantize.py:initialize()` with `--all-node-with-qdq` (Option#2 in [export/README.md](export/README.md)) registers `models.common.Concat → QuantConcat` (and `nn.SiLU → QuantSiLU`) in pytorch-quantization's module-replacement map — a class-based swap that is only possible because Concat is a module; functional `torch.cat` could never be replaced. DLA requires an INT8 scale on every op including Concat (on GPU, TensorRT may let concat run at higher precision; qdq_translator's `--infer_concat_scales` exists for the Option#1 path where concat has no trained scale). The change is purely structural: identical numerics, identical exported ONNX graph.
 
@@ -89,6 +96,9 @@ matx unit test: `./test` from `src/matx_reformat/build/` (with that dir on `LD_L
 make run                                # single image → detections drawn to result.jpg
 make validate_cudla_int8                # COCO val2017 (5000 imgs) + pycocotools mAP, ~30–60 min
 make validate_cudla_int8 ENGINE=data/loadable/<other 80-class loadable>.bin
+# NMS placement (both models/families): default GPU (fast); --nms cpu = greedy
+# (torchvision/ultralytics semantics, exactly reproduces reference mAP — see
+# the NMS note below)
 
 # or directly:
 ./build/cudla_yolov5_app --engine data/loadable/yolov5.int8.int8hwc4in.fp16chw16out.standalone.bin \
@@ -159,7 +169,7 @@ NUM_CLASSES=<nc> [INPUT_H=<h> INPUT_W=<w>] bash src/matx_reformat/build_matx_ref
 make clean && make NUM_CLASSES=<nc> [INPUT_H=<h> INPUT_W=<w>]
 ```
 
-`NUM_CLASSES` defaults to 80 (the shipped COCO model). It drives buffer sizes, the decode call sites and the CHW16/CHW32 reformat group dims (`YOLO_NUM_CLASSES` macro in [src/yolov5.cpp](src/yolov5.cpp) and [matx_reformat.cu](src/matx_reformat/matx_reformat.cu); `decode_nms.cu` is parameterized). `INPUT_H`/`INPUT_W` (both multiples of 32) default to 672x672 and drive every derived geometry (head grids, anchor count, letterbox canvas) via `YOLO_INPUT_H/W`; they must match the loadable's export size exactly — 720p: export `--size=736x1280`, build `INPUT_H=736 INPUT_W=1280`, using [build_dla_standalone_loadable_3classes_720p.sh](data/model/build_dla_standalone_loadable_3classes_720p.sh) (verified end-to-end: INT8 5.5 ms @ 12 dets, FP16 13 dets). **The flag must match the loadable passed to `--engine`/`ENGINE=`** — a mismatch silently garbage-results. Also: `anchors[]` in yolov5.cpp — only if training (①–⑤) replaced them; `mInputScale` — only if ⑥ found a different value.
+`NUM_CLASSES` defaults to 80 (the shipped COCO model). It drives buffer sizes, the decode call sites and the CHW16/CHW32 reformat group dims (`YOLO_NUM_CLASSES` macro in [src/yolov5.cpp](src/yolov5.cpp) and [matx_reformat.cu](src/matx_reformat/matx_reformat.cu); `decode_nms.cu` is parameterized). For the Ultralytics family add `HEAD_STYLE=v8 [REG_MAX=1 for yolo26]` (anchor-free DFL head; see Pipeline C) and `INPUT_SCALE=<the cache's images: float>` for every model whose calibration differs from the original COCO cache. `INPUT_H`/`INPUT_W` (both multiples of 32) default to 672x672 and drive every derived geometry (head grids, anchor count, letterbox canvas) via `YOLO_INPUT_H/W`; they must match the loadable's export size exactly — 720p: export `--size=736x1280`, build `INPUT_H=736 INPUT_W=1280`, using [build_dla_standalone_loadable_3classes_720p.sh](data/model/build_dla_standalone_loadable_3classes_720p.sh) (verified end-to-end: INT8 5.5 ms @ 12 dets, FP16 13 dets). **The flag must match the loadable passed to `--engine`/`ENGINE=`** — a mismatch silently garbage-results. Also: `anchors[]` in yolov5.cpp — only if training (①–⑤) replaced them; `mInputScale` — only if ⑥ found a different value.
 
 **⑨ Jetson — run and verify:**
 
@@ -182,6 +192,32 @@ python3 test_coco_map.py --predict predict.json --coco /path/to/ds
 If boxes look systematically wrong on in-domain images, compare the checkpoint's `model.model[-1].anchors` against yolov5.cpp's `anchors[]`.
 
 Lazy alternative for experiments only: map custom classes into unused COCO slots (keep the 80-class head) — zero C++ changes, wasted head compute.
+
+## Pipeline C — Ultralytics Family: Train → QAT → DLA Deployment
+
+The modern-family line (yolov5su / yolov8; yolo11/26 blocked by attention ops — see [docs/dla-unsupported-ops.zh-CN.md](docs/dla-unsupported-ops.zh-CN.md)). Full command cookbook: [docs/ultralytics-family-commands.zh-CN.md](docs/ultralytics-family-commands.zh-CN.md); QAT training doc: [ultralytics/CLAUDE.dla.zh-CN.md](ultralytics/CLAUDE.dla.zh-CN.md); design + results: [docs/ultralytics-support.zh-CN.md](docs/ultralytics-support.zh-CN.md).
+
+```bash
+# ① QAT (label-free calibration + MSE-distillation finetune; Jetson demo params)
+cd ultralytics
+python scripts/qat_dla.py quantize weights/yolov8s.pt \
+    --calib-dir <image folder or dataset root> --imgsz 672 \
+    --train-list <lists...> --val-list <lists...> --data <yaml> \
+    --ptq ptq_v8.pt --qat qat_v8.pt --eval-origin --eval-ptq --summary summary.json
+
+# ② Export (chunk-split automatic; equivalence-checked)
+python scripts/export_dla.py --weights qat_v8.pt --qat --size 672 --dynamic \
+    --save ../data/model/yolov8s_qat.onnx
+
+# ③–⑤ On the Jetson: qdq_translator (same flags as A3) → copy
+#    build_dla_standalone_loadable_v8_int8.sh (head at /model.22; v5su at
+#    /model.24 — own script) → build with the matching flags:
+HEAD_STYLE=v8 bash src/matx_reformat/build_matx_reformat.sh
+make clean && make HEAD_STYLE=v8 INPUT_SCALE=<cache images: float>
+./build/cudla_yolov5_app --engine data/loadable/yolov8s.int8...bin --image x.jpg --backend cudla_int8
+```
+
+Verified results (INT8, 672): **yolov8s mAP 44.6 @ 3.94ms**, **yolov5su mAP 42.6 @ 3.47ms** (C3 backbone needs no chunk-split — faster and simpler than native v8). FP16 quick path (3 steps, no QAT) also in the cookbook.
 
 ## Troubleshooting Log
 

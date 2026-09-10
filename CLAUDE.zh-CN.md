@@ -30,9 +30,16 @@ NVIDIA 官方示例：将 QAT（量化感知训练）后的 YOLOv5s 部署到 Or
   - [src/cudla_context_hybrid.cpp](src/cudla_context_hybrid.cpp) —— 混合模式：CUDA 分配的缓冲区通过 `cudlaMemRegister` 注册到 cuDLA；任务在 CUDA stream 上提交。是集成最简单的路径。
   - [src/cudla_context_standalone.cpp](src/cudla_context_standalone.cpp) —— 独立模式：使用 NvSciBuf/NvSciSync 管理缓冲区和 fence，并作为外部内存/信号量导入 CUDA。使 DLA 路径不依赖 CUDA context 的创建；确定性信号量变体（`USE_DETERMINISTIC_SEMAPHORE`）是对较老 DriveOS/JetPack 上 NvSciSync 行为的变通方案。
   - 两个上下文类都刻意保持自包含（不依赖示例中的其他代码），方便用户直接拷贝到自己项目中使用 —— 修改时请保持这一特性。
+- [src/decode_dfl.cu](src/decode_dfl.cu) —— Ultralytics 家族（v5su/v8/v11/v26 头）的 anchor-free DFL 解码 kernel（`make HEAD_STYLE=v8`）。实现经源码核对的 ultralytics 解码数学：DFL softmax 积分（reg_max 运行时参数，1 = yolo26）、dist2bbox、纯 sigmoid 类别分。经典 v5 解码仍在 `decode_nms.cu`；`nms_kernel_invoker` 是两族共用的 GPU NMS。
 - [src/matx_reformat/](src/matx_reformat/) —— 封装 MatX 子模块的独立 CMake 库（pimpl 模式：`ReformatRunner`）。负责 DLA 张量布局与平面格式之间的转换：`ReformatImage`/`ReformatImageV2`（输入 CHW→HWC4/CHW16）、`Run`/`Transpose`（输出 CHW16→平面格式，对应 stride 8/16/32 的三个 YOLOv5 检测头）。通道几何由同一个 `YOLO_NUM_CLASSES` 宏推导（CHW16/CHW32 会把检测头通道补齐到 16/32 的倍数）。
 - [data/model/](data/model/) —— 用 trtexec 将 ONNX 模型编译为 DLA loadable 的脚本。INT8 loadable 使用 `--inputIOFormats=int8:dla_hwc4 --outputIOFormats=fp16:chw16`，并将最后的检测头卷积强制为 FP16（`--layerPrecisions`）。`build_dla_standalone_loadable_v2.sh` 将更多层回退到 FP16（精度更高、速度更慢）。需要 trtexec 支持 `--buildDLAStandalone` 参数（`data/trtexec-dla-standalone-trtv8.5.patch` 补丁仅 TRT 8.5 / JetPack 6.0 之前需要）。
 - [export/](export/) —— 训练侧工具链，与 C++ 程序相互独立：`yolov5-qat/` 是面向 ultralytics yolov5 v7.0 checkout 的原始覆盖层；`qdq_translator/` 将 QAT ONNX（含 Q/DQ 节点）转换为 PTQ ONNX + INT8 校准缓存。服务器端工作副本在 `yolov5_dla/`（v7.0 + 覆盖层，并工程化强化：CLI 参数化的 `qat.py`、torch 2.x amp 兼容、自定义数据集 pycocotools 支持 —— 详见其自带 CLAUDE.md）。覆盖层恰好 4 个文件：3 个新增（`quantization/quantize.py`、`quantization/rules.py`、`scripts/qat.py`）+ 1 个修改（`models/common.py`）。
+
+- `ultralytics/` —— 现代家族工具包（ultralytics 8.4.142 clone，`.git` 已移除、纳入版本管理）：`scripts/qat_dla.py`（PTQ/QAT、best-mAP 保存 —— 见其自带 [CLAUDE.dla.zh-CN.md](ultralytics/CLAUDE.dla.zh-CN.md)）与 `scripts/export_dla.py`（raw-head 导出 + C2f chunk 拆分 + Q/DQ 发射）。不改动任何上游文件。
+
+### 文档索引
+
+[docs/](docs/) 下的深度文档（均中文）：[ultralytics-support.zh-CN.md](docs/ultralytics-support.zh-CN.md)（P0–P2 设计与实测）、[ultralytics-family-commands.zh-CN.md](docs/ultralytics-family-commands.zh-CN.md)（分步命令手册）、[int8-fp16-ratio-analysis.zh-CN.md](docs/int8-fp16-ratio-analysis.zh-CN.md)（INT8/FP16 占比分析与 QuantAdd 导出 bug 复盘）、[dla-unsupported-ops.zh-CN.md](docs/dla-unsupported-ops.zh-CN.md)（算子障碍总账与 TODO）。QAT 原理：[yolov5_dla/docs/qat-internals.zh-CN.md](yolov5_dla/docs/qat-internals.zh-CN.md)。
 
 **`yolov5-qat` 覆盖层对 `models/common.py` 的改动**（唯一被修改的文件，与上游 v7.0 差异 ~35 行）：`C3TR`、`C3`、`SPP`、`SPPF`、`Focus`、`GhostConv`、`Classify` 中所有函数式 `torch.cat(..., 1)` 都改为经由 `self.concat = Concat(1)` 子模块调用。原因：`quantization/quantize.py` 的 `initialize()` 在 `--all-node-with-qdq`（[export/README.md](export/README.md) 的 Option#2）时会把 `models.common.Concat → QuantConcat`（以及 `nn.SiLU → QuantSiLU`）注册进 pytorch-quantization 的模块替换表 —— 这是按"模块类"做的替换，只有 Concat 是模块才能被换掉，函数式 `torch.cat` 永远无法替换。而 DLA 要求图中每个算子（包括 Concat）都有 INT8 scale（GPU 上 TensorRT 允许 concat 以更高精度运行；Option#1 路径下 concat 没有训练出的 scale，qdq_translator 的 `--infer_concat_scales` 就是为它服务的）。该改动纯属结构性：数值结果与导出的 ONNX 图完全不变。
 
@@ -89,6 +96,8 @@ matx 单元测试：在 `src/matx_reformat/build/` 下运行 `./test`（该目�
 make run                                # 单张图 → 检测框画到 result.jpg
 make validate_cudla_int8                # COCO val2017（5000 张）+ pycocotools mAP，约 30~60 分钟
 make validate_cudla_int8 ENGINE=data/loadable/<其他80类loadable>.bin
+# NMS 放置（所有模型/家族通用）：默认 GPU（快）；--nms cpu = 贪心语义
+# （torchvision/ultralytics 口径，精确复现参考 mAP —— 见下方 NMS 说明）
 
 # 或直接运行二进制：
 ./build/cudla_yolov5_app --engine data/loadable/yolov5.int8.int8hwc4in.fp16chw16out.standalone.bin \
@@ -159,7 +168,7 @@ NUM_CLASSES=<nc> [INPUT_H=<h> INPUT_W=<w>] bash src/matx_reformat/build_matx_ref
 make clean && make NUM_CLASSES=<nc> [INPUT_H=<h> INPUT_W=<w>]
 ```
 
-`NUM_CLASSES` 默认 80（仓库自带的 COCO 模型）。它驱动缓冲区尺寸、decode 调用点和 CHW16/CHW32 重排的分组维度（`YOLO_NUM_CLASSES` 宏，见 [src/yolov5.cpp](src/yolov5.cpp) 与 [matx_reformat.cu](src/matx_reformat/matx_reformat.cu)；`decode_nms.cu` 是参数化的）。`INPUT_H`/`INPUT_W`（均须为 32 的倍数）默认 672×672，经 `YOLO_INPUT_H/W` 宏驱动全部派生几何（检测头网格、锚点总数、letterbox 画布），必须与 loadable 的导出尺寸完全一致 —— 720p：导出用 `--size=736x1280`、构建用 `INPUT_H=736 INPUT_W=1280`，构建脚本为 [build_dla_standalone_loadable_3classes_720p.sh](data/model/build_dla_standalone_loadable_3classes_720p.sh)（已端到端验证：INT8 5.5ms @ 12 目标、FP16 13 目标）。**该参数必须与 `--engine`/`ENGINE=` 传入的 loadable 匹配** —— 不匹配会静默产生乱码级结果。另外：仅当 ② 替换过锚点才需改 yolov5.cpp 的 `anchors[]`；仅当 ⑥ 发现值不同才需改 `mInputScale`。
+`NUM_CLASSES` 默认 80（仓库自带的 COCO 模型）。它驱动缓冲区尺寸、decode 调用点和 CHW16/CHW32 重排的分组维度（`YOLO_NUM_CLASSES` 宏，见 [src/yolov5.cpp](src/yolov5.cpp) 与 [matx_reformat.cu](src/matx_reformat/matx_reformat.cu)；`decode_nms.cu` 是参数化的）。Ultralytics 家族另需 `HEAD_STYLE=v8 [REG_MAX=1 for yolo26]`（anchor-free DFL 头，见线路 C）；`INPUT_SCALE=<缓存 images: 浮点值>` 用于校准与原版 COCO 缓存不同的模型。`INPUT_H`/`INPUT_W`（均须为 32 的倍数）默认 672×672，经 `YOLO_INPUT_H/W` 宏驱动全部派生几何（检测头网格、锚点总数、letterbox 画布），必须与 loadable 的导出尺寸完全一致 —— 720p：导出用 `--size=736x1280`、构建用 `INPUT_H=736 INPUT_W=1280`，构建脚本为 [build_dla_standalone_loadable_3classes_720p.sh](data/model/build_dla_standalone_loadable_3classes_720p.sh)（已端到端验证：INT8 5.5ms @ 12 目标、FP16 13 目标）。**该参数必须与 `--engine`/`ENGINE=` 传入的 loadable 匹配** —— 不匹配会静默产生乱码级结果。另外：仅当 ② 替换过锚点才需改 yolov5.cpp 的 `anchors[]`；仅当 ⑥ 发现值不同才需改 `mInputScale`。
 
 **⑨ Jetson —— 运行与验证：**
 
@@ -182,6 +191,31 @@ python3 test_coco_map.py --predict predict.json --coco /path/to/ds
 若在自有数据图像上检测框系统性错位，对比 checkpoint 的 `model.model[-1].anchors` 与 yolov5.cpp 的 `anchors[]`。
 
 仅供快速实验的偷懒方案：把自定义类映射到 COCO 未用的槽位（保持 80 类头）—— C++ 零改动，但头层浪费算力。
+
+## 线路 C —— Ultralytics 家族：训练 → QAT → DLA 部署
+
+现代家族路线（yolov5su / yolov8；yolo11/26 被注意力算子阻断 —— 见 [docs/dla-unsupported-ops.zh-CN.md](docs/dla-unsupported-ops.zh-CN.md)）。完整命令手册：[docs/ultralytics-family-commands.zh-CN.md](docs/ultralytics-family-commands.zh-CN.md)；QAT 训练文档：[ultralytics/CLAUDE.dla.zh-CN.md](ultralytics/CLAUDE.dla.zh-CN.md)；设计与实测：[docs/ultralytics-support.zh-CN.md](docs/ultralytics-support.zh-CN.md)。
+
+```bash
+# ① QAT（免标签校准 + MSE 蒸馏微调；Jetson 演示参数）
+cd ultralytics
+python scripts/qat_dla.py quantize weights/yolov8s.pt \
+    --calib-dir <图片文件夹或数据集根> --imgsz 672 \
+    --train-list <清单...> --val-list <清单...> --data <yaml> \
+    --ptq ptq_v8.pt --qat qat_v8.pt --eval-origin --eval-ptq --summary summary.json
+
+# ② 导出（chunk 拆分自动做；等价性自检）
+python scripts/export_dla.py --weights qat_v8.pt --qat --size 672 --dynamic \
+    --save ../data/model/yolov8s_qat.onnx
+
+# ③–⑤ Jetson：qdq_translator（同 A3）→ 复制 build_dla_standalone_loadable_v8_int8.sh
+#    （v8 头在 /model.22；v5su 在 /model.24 有专属脚本）→ 配套参数构建：
+HEAD_STYLE=v8 bash src/matx_reformat/build_matx_reformat.sh
+make clean && make HEAD_STYLE=v8 INPUT_SCALE=<缓存 images: 值>
+./build/cudla_yolov5_app --engine data/loadable/yolov8s.int8...bin --image x.jpg --backend cudla_int8
+```
+
+实测成绩（INT8，672）：**yolov8s mAP 44.6 @ 3.94ms**、**yolov5su mAP 42.6 @ 3.47ms**（C3 骨干无需 chunk 拆分 —— 比原生 v8 更快更简单）。FP16 快速路线（3 步、无量化）也在命令手册中。
 
 ## 问题记录
 

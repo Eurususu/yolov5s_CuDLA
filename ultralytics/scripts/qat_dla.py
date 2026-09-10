@@ -39,6 +39,13 @@
 #     head convs in the DLA loadable). Relative entries inside the yaml's txt
 #     lists are auto-absolutized against the yaml path (ultralytics resolves
 #     them against the CWD otherwise).
+#   Additional yolov5_dla-parity features:
+#     --eval-origin / --eval-ptq  FP / calibrated baselines before QAT
+#     --ignore-policy regex       keep matching convs unquantized (e.g. head)
+#     --supervision-stride N      supervise every Nth leaf (default 3)
+#     --summary file.json         persist the run history
+#   The finetune lr follows yolov5_dla's warmup->train->anneal schedule
+#   ({0: 1e-6, 3: 1e-5, 8: 1e-6}); --epochs >= 10 recommended for full runs.
 
 import argparse
 import os
@@ -97,17 +104,24 @@ def _transfer(src: torch.nn.Module, dst_cls) -> torch.nn.Module:
     return dst
 
 
-def replace_to_quantization_module(model) -> int:
+def replace_to_quantization_module(model, ignore_policy=None) -> int:
     """nn.Conv2d -> QuantConv2d everywhere (the inner conv of ultralytics Conv
-    wrappers included — the recursive walk visits children)."""
+    wrappers included — the recursive walk visits children). ignore_policy: a
+    regex matched against the qualified module path (yolov5_dla convention,
+    e.g. r"model\.22\..*Conv" keeps the v8 head convs unquantized)."""
+    import re as _re
     count = 0
 
-    def rec(module):
+    def rec(module, prefix=""):
         nonlocal count
         for name in module._modules:
             sub = module._modules[name]
-            rec(sub)
+            path = name if not prefix else f"{prefix}.{name}"
+            rec(sub, path)
             if type(sub) is torch.nn.Conv2d:
+                if ignore_policy and _re.search(ignore_policy, path):
+                    print(f"  [ignore-policy] {path} kept in FP")
+                    continue
                 module._modules[name] = _transfer(sub, quant_nn.QuantConv2d)
                 count += 1
 
@@ -244,10 +258,14 @@ def calibrate_model(model, loader, device, num_batch=25):
     print("calibration done (input: histogram+mse, weight: max)")
 
 
-def finetune(model, loader, device, nepochs=10, iters_per_epoch=1000, lr=1e-5, on_epoch_end=None):
+def finetune(model, loader, device, nepochs=10, iters_per_epoch=1000, lr=1e-5, on_epoch_end=None,
+            lrschedule=None, supervision_stride=3):
     """Label-free QAT: MSE-distil the quantized model's layer outputs against a
     frozen FP copy (identical objective to the yolov5_dla line). on_epoch_end
-    (model, epoch, lr) may return True to stop early (best-mAP saver)."""
+    (model, epoch, lr) may return True to stop early (best-mAP saver).
+    lrschedule {epoch: lr} follows yolov5_dla's warmup -> train -> anneal."""
+    if lrschedule is None:
+        lrschedule = {0: 1e-6, 3: 1e-5, 8: 1e-6}  # same default as yolov5_dla
     teacher = deepcopy(model).eval()
     for _, m in teacher.named_modules():
         if isinstance(m, quant_nn.TensorQuantizer):
@@ -256,6 +274,12 @@ def finetune(model, loader, device, nepochs=10, iters_per_epoch=1000, lr=1e-5, o
     model.train()
     model.requires_grad_(True)
     optimizer = optim.Adam(model.parameters(), lr)
+
+    def apply_lr(epoch):
+        if epoch in lrschedule:
+            for g in optimizer.param_groups:
+                g["lr"] = lrschedule[epoch]
+        return optimizer.param_groups[0]["lr"]
     lossfn = torch.nn.MSELoss()
 
     pairs = [(m, t) for (n, m), (_, t) in zip(model.named_modules(), teacher.named_modules())
@@ -267,9 +291,10 @@ def finetune(model, loader, device, nepochs=10, iters_per_epoch=1000, lr=1e-5, o
         return fn
 
     for iepoch in range(nepochs):
-        for imgs in tqdm(loader, total=iters_per_epoch, desc=f"QAT {iepoch + 1}/{nepochs}"):
+        lr_now = apply_lr(iepoch)
+        for imgs in tqdm(loader, total=iters_per_epoch, desc=f"QAT {iepoch + 1}/{nepochs} @lr={lr_now:g}"):
             outs_q, outs_fp, handles = [], [], []
-            for m, t in pairs[::3]:  # supervise every 3rd leaf module (see yolov5_dla notes)
+            for m, t in pairs[::supervision_stride]:  # see yolov5_dla notes: all-layer supervision lets shallow layers dominate
                 handles.append(m.register_forward_hook(hook(outs_q)))
                 handles.append(t.register_forward_hook(hook(outs_fp)))
             with torch.no_grad():
@@ -282,7 +307,7 @@ def finetune(model, loader, device, nepochs=10, iters_per_epoch=1000, lr=1e-5, o
             optimizer.step()
             optimizer.zero_grad()
             print(f"  loss {loss.item():.5f}")
-        if on_epoch_end is not None and on_epoch_end(model, iepoch, lr):
+        if on_epoch_end is not None and on_epoch_end(model, iepoch, lr_now):
             print("QAT finetune done (early stop by epoch callback)")
             return
     print("QAT finetune done")
@@ -312,7 +337,7 @@ def validate_mse(model, loader, device, max_batches=10):
             if i >= max_batches:
                 break
             outs_q, outs_fp, handles = [], [], []
-            for m, t in pairs[::3]:
+            for m, t in pairs[::3]:  # fixed stride here: keep the signal comparable across runs
                 handles.append(m.register_forward_hook(hook(outs_q)))
                 handles.append(t.register_forward_hook(hook(outs_fp)))
             teacher(imgs.to(device))
@@ -407,6 +432,13 @@ def main():
     q.add_argument("--data", type=str, default=None,
                    help="ultralytics dataset yaml for per-epoch mAP evaluation; with it, --qat saves the "
                         "best-mAP epoch (yolov5_dla behavior). Without it, QAT saves the last epoch.")
+    q.add_argument("--eval-origin", action="store_true",
+                   help="evaluate the FP model before quantization (baseline; needs --data)")
+    q.add_argument("--eval-ptq", action="store_true",
+                   help="evaluate the calibrated PTQ model before finetuning (needs --data)")
+    q.add_argument("--ignore-policy", type=str, default=None, help="regex: modules whose convs stay unquantized")
+    q.add_argument("--supervision-stride", type=int, default=3, help="supervise every Nth leaf module (yolov5_dla: 3)")
+    q.add_argument("--summary", type=str, default=None, help="save the run history to this JSON (yolov5_dla summary.json)")
     args = parser.parse_args()
 
     size = tuple(int(v) for v in args.imgsz.lower().split("x")) if "x" in args.imgsz.lower() else int(args.imgsz)
@@ -417,7 +449,17 @@ def main():
     if hasattr(net, "fuse"):
         net.fuse()   # BEFORE quantization; the facade keeps mutating this same object
 
-    n_conv = replace_to_quantization_module(net)
+    summary = []
+    if args.eval_origin:
+        if not args.data:
+            raise SystemExit("--eval-origin needs --data")
+        facade.model.eval()
+        summary.append(["Origin", evaluate_map(facade, args.data,
+                        int(args.imgsz.split("x")[0]) if "x" in args.imgsz else int(args.imgsz),
+                        args.batch_size, device)])
+        print(f"Origin mAP50-95 = {summary[-1][1]:.5f}")
+
+    n_conv = replace_to_quantization_module(net, ignore_policy=args.ignore_policy)
     n_add = replace_bottleneck_forward(net)
     print(f"quantized {n_conv} convs, {n_add} residual adds (QuantAdd)")
 
@@ -434,6 +476,13 @@ def main():
     if args.ptq:
         torch.save({"model": net}, args.ptq)
         print(f"saved PTQ model to {args.ptq}")
+        if args.eval_ptq:
+            if not args.data:
+                raise SystemExit("--eval-ptq needs --data")
+            summary.append(["PTQ", evaluate_map(facade, args.data,
+                            int(args.imgsz.split("x")[0]) if "x" in args.imgsz else int(args.imgsz),
+                            args.batch_size, device)])
+            print(f"PTQ mAP50-95 = {summary[-1][1]:.5f}")
         if val_loader:
             print(f"PTQ val divergence (layer-MSE, lower=closer to FP): {validate_mse(net, val_loader, device):.5f}")
 
@@ -456,16 +505,22 @@ def main():
 
             per_epoch.best = -1.0
             finetune(net, loader, device, nepochs=args.epochs, iters_per_epoch=args.iters,
-                     on_epoch_end=per_epoch)
+                     on_epoch_end=per_epoch, supervision_stride=args.supervision_stride)
             if per_epoch.best < 0:  # no epoch improved the sentinel (shouldn't happen)
                 torch.save({"model": net}, args.qat)
+            summary.extend([(f"QAT{e}", a) for e, a in history])
             print(f"QAT history: {[(e, round(a, 5)) for e, a in history]} | best mAP50-95 = {per_epoch.best:.5f}")
         else:
-            finetune(net, loader, device, nepochs=args.epochs, iters_per_epoch=args.iters)
+            finetune(net, loader, device, nepochs=args.epochs, iters_per_epoch=args.iters,
+                     supervision_stride=args.supervision_stride)
             torch.save({"model": net}, args.qat)
             print(f"saved QAT model to {args.qat}")
         if val_loader:
             print(f"QAT val divergence (layer-MSE, lower=closer to FP): {validate_mse(net, val_loader, device):.5f}")
+    if args.summary:
+        import json as _json
+        _json.dump(summary, open(args.summary, "w"), indent=4)
+        print(f"summary saved to {args.summary}")
 
 
 if __name__ == "__main__":

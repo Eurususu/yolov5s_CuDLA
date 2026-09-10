@@ -31,7 +31,14 @@
 #   python scripts/qat_dla.py quantize weights/yolov8s.pt \
 #       --calib-dir /root/dataset/3classes --imgsz 672 \
 #       --train-list origin_train.txt ship_add_train.txt \
-#       --val-list origin_val.txt --ptq ptq.pt --qat qat.pt
+#       --val-list origin_val.txt --data data/3classes.yaml \
+#       --ptq ptq.pt --qat qat.pt
+#     --data (ultralytics dataset yaml) enables per-epoch mAP evaluation:
+#     qat.pt then holds the BEST-mAP epoch (yolov5_dla behavior) instead of
+#     the last. Head quantizers are disabled during eval (matches the FP16
+#     head convs in the DLA loadable). Relative entries inside the yaml's txt
+#     lists are auto-absolutized against the yaml path (ultralytics resolves
+#     them against the CWD otherwise).
 
 import argparse
 import os
@@ -237,9 +244,10 @@ def calibrate_model(model, loader, device, num_batch=25):
     print("calibration done (input: histogram+mse, weight: max)")
 
 
-def finetune(model, loader, device, nepochs=10, iters_per_epoch=1000, lr=1e-5):
+def finetune(model, loader, device, nepochs=10, iters_per_epoch=1000, lr=1e-5, on_epoch_end=None):
     """Label-free QAT: MSE-distil the quantized model's layer outputs against a
-    frozen FP copy (identical objective to the yolov5_dla line)."""
+    frozen FP copy (identical objective to the yolov5_dla line). on_epoch_end
+    (model, epoch, lr) may return True to stop early (best-mAP saver)."""
     teacher = deepcopy(model).eval()
     for _, m in teacher.named_modules():
         if isinstance(m, quant_nn.TensorQuantizer):
@@ -274,6 +282,9 @@ def finetune(model, loader, device, nepochs=10, iters_per_epoch=1000, lr=1e-5):
             optimizer.step()
             optimizer.zero_grad()
             print(f"  loss {loss.item():.5f}")
+        if on_epoch_end is not None and on_epoch_end(model, iepoch, lr):
+            print("QAT finetune done (early stop by epoch callback)")
+            return
     print("QAT finetune done")
 
 
@@ -315,6 +326,63 @@ def validate_mse(model, loader, device, max_batches=10):
     return total / max(n, 1)
 
 
+_ABS_YAML_CACHE = {}
+
+
+def absolutize_data_yaml(data_yaml):
+    """ultralytics resolves RELATIVE entries inside txt list files against the
+    CWD (yolov5 heritage), NOT against the yaml's path: — a val run from any
+    other directory silently drops every image ("No valid images found").
+    Rewrite txt lists with relative entries into *_abs.txt (resolved against
+    the yaml path) and return a patched yaml path (originals untouched)."""
+    if data_yaml in _ABS_YAML_CACHE:
+        return _ABS_YAML_CACHE[data_yaml]
+    import yaml as _yaml
+    with open(data_yaml) as f:
+        cfg = _yaml.safe_load(f)
+    root = cfg.get("path", "")
+    for k in ("train", "val", "test"):
+        v = cfg.get(k)
+        if not isinstance(v, str) or not v.endswith(".txt"):
+            continue
+        list_path = v if os.path.isabs(v) else os.path.join(root, v)
+        if not os.path.isfile(list_path):
+            list_path = os.path.join(os.path.dirname(data_yaml), v)  # list next to the yaml
+        with open(list_path) as f:
+            entries = [l.strip() for l in f if l.strip()]
+        if entries and not all(os.path.isabs(e) for e in entries):
+            abs_list = list_path[:-4] + "_abs.txt"
+            with open(abs_list, "w") as f:
+                f.write("\n".join(e if os.path.isabs(e) else os.path.join(root, e) for e in entries))
+            cfg[k] = abs_list
+    patched = os.path.join("/tmp", "qat_dla_" + os.path.splitext(os.path.basename(data_yaml))[0] + ".yaml")
+    with open(patched, "w") as f:
+        _yaml.dump(cfg, f)
+    _ABS_YAML_CACHE[data_yaml] = patched
+    return patched
+
+
+def evaluate_map(facade, data_yaml, imgsz, batch, device):
+    """mAP50-95 via ultralytics' own validator on the (in-place quantized)
+    facade.model. Head (model[-1]) quantizers are disabled during eval — the
+    deployment loadable runs the head convs in FP16, so this matches what will
+    actually be measured on-device."""
+    head = facade.model.model[-1] if hasattr(facade.model, "model") else facade.model[-1]
+    saved = []
+    for _, m in head.named_modules():
+        if isinstance(m, quant_nn.TensorQuantizer):
+            saved.append((m, m._disabled))
+            m._disabled = True
+    facade.model.eval()
+    try:
+        results = facade.val(data=absolutize_data_yaml(data_yaml), imgsz=imgsz, batch=batch, device=str(device),
+                            plots=False, verbose=False)
+        return float(results.box.map)
+    finally:
+        for m, d in saved:
+            m._disabled = d
+
+
 def main():
     parser = argparse.ArgumentParser(prog="qat_dla.py")
     sub = parser.add_subparsers(dest="cmd", required=True)
@@ -336,14 +404,18 @@ def main():
     q.add_argument("--epochs", type=int, default=10)
     q.add_argument("--iters", type=int, default=1000, help="batches per epoch cap (small for dry runs)")
     q.add_argument("--device", type=str, default="cuda:0")
+    q.add_argument("--data", type=str, default=None,
+                   help="ultralytics dataset yaml for per-epoch mAP evaluation; with it, --qat saves the "
+                        "best-mAP epoch (yolov5_dla behavior). Without it, QAT saves the last epoch.")
     args = parser.parse_args()
 
     size = tuple(int(v) for v in args.imgsz.lower().split("x")) if "x" in args.imgsz.lower() else int(args.imgsz)
     device = torch.device(args.device)
 
-    net = YOLO(args.weight).model.to(device).float().eval()
+    facade = YOLO(args.weight)
+    net = facade.model.to(device).float().eval()
     if hasattr(net, "fuse"):
-        net.fuse()
+        net.fuse()   # BEFORE quantization; the facade keeps mutating this same object
 
     n_conv = replace_to_quantization_module(net)
     n_add = replace_bottleneck_forward(net)
@@ -366,9 +438,32 @@ def main():
             print(f"PTQ val divergence (layer-MSE, lower=closer to FP): {validate_mse(net, val_loader, device):.5f}")
 
     if args.qat:
-        finetune(net, loader, device, nepochs=args.epochs, iters_per_epoch=args.iters)
-        torch.save({"model": net}, args.qat)
-        print(f"saved QAT model to {args.qat}")
+        if args.data:
+            # best-mAP mode (yolov5_dla parity): evaluate per epoch, keep the best.
+            # Head quantization is disabled during eval (matches the FP16-head loadable).
+            history = []
+
+            def per_epoch(model, epoch, lr):
+                ap = evaluate_map(facade, args.data, int(args.imgsz.split("x")[0]) if "x" in args.imgsz else int(args.imgsz),
+                                  args.batch_size, device)
+                history.append((epoch, ap))
+                print(f"  epoch {epoch + 1}: mAP50-95 = {ap:.5f}")
+                if ap > per_epoch.best:
+                    per_epoch.best = ap
+                    torch.save({"model": model}, args.qat)
+                    print(f"  saved best-mAP checkpoint to {args.qat} (map={ap:.5f})")
+                return False
+
+            per_epoch.best = -1.0
+            finetune(net, loader, device, nepochs=args.epochs, iters_per_epoch=args.iters,
+                     on_epoch_end=per_epoch)
+            if per_epoch.best < 0:  # no epoch improved the sentinel (shouldn't happen)
+                torch.save({"model": net}, args.qat)
+            print(f"QAT history: {[(e, round(a, 5)) for e, a in history]} | best mAP50-95 = {per_epoch.best:.5f}")
+        else:
+            finetune(net, loader, device, nepochs=args.epochs, iters_per_epoch=args.iters)
+            torch.save({"model": net}, args.qat)
+            print(f"saved QAT model to {args.qat}")
         if val_loader:
             print(f"QAT val divergence (layer-MSE, lower=closer to FP): {validate_mse(net, val_loader, device):.5f}")
 
